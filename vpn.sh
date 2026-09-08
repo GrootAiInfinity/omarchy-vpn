@@ -4,8 +4,8 @@
 #   vpn.sh status                 One-line JSON snapshot for the widget.
 #   vpn.sh inbox                  JSON list of importable .conf files in the inbox.
 #   vpn.sh import <basename>      Import inbox/<basename> as a NetworkManager tunnel.
-#   vpn.sh import-file <path>     Copy any .conf into the inbox and import it.
-#   vpn.sh pick-import            GUI file chooser (zenity), then import-file.
+#   vpn.sh import-file <path>...  Copy any .conf files into the inbox and import them.
+#   vpn.sh pick-import            GUI multi-file chooser (zenity), then import-file.
 #   vpn.sh forget  <id>           Delete one of our tunnels (id must be omarchy-vpn-*).
 #   vpn.sh connect <id>           Re-pin the endpoint and bring the tunnel up.
 #   vpn.sh disconnect [<id>]      Bring one / all of our tunnels down.
@@ -84,16 +84,35 @@ slugify() {
   printf '%s' "${s:0:40}"
 }
 
-# Regional-indicator flag from a 2-letter country code (uk -> gb special case).
+# Regional-indicator flag from a 2-letter country code (uk -> gb special case);
+# a globe for anything else. The UTF-8 bytes are emitted directly because this
+# script runs under LC_ALL=C — where bash's printf prints a \U escape literally
+# instead of the character — and the label ends up verbatim in the panel.
 cc_flag() {
   local cc=${1,,} a b
   [[ $cc == uk ]] && cc=gb
   a=${cc:0:1}; b=${cc:1:1}
-  if [[ $a == [a-z] && $b == [a-z] ]]; then
-    printf "\\U$(printf %08x $((0x1F1E6 + $(printf '%d' "'$a") - 97)))\\U$(printf %08x $((0x1F1E6 + $(printf '%d' "'$b") - 97)))"
+  if [[ ${#cc} -eq 2 && $a == [a-z] && $b == [a-z] && $cc != xx ]]; then
+    # U+1F1E6 .. U+1F1FF  ->  f0 9f 87 a6 .. f0 9f 87 bf
+    local h1 h2
+    printf -v h1 '%02x' $(( 0xa6 + $(printf '%d' "'$a") - 97 ))
+    printf -v h2 '%02x' $(( 0xa6 + $(printf '%d' "'$b") - 97 ))
+    printf '%b' "\xf0\x9f\x87\x$h1\xf0\x9f\x87\x$h2"
   else
-    printf '\U0001F310'
+    printf '%b' '\xf0\x9f\x8c\x90'   # U+1F310 globe
   fi
+}
+
+# Repair a label written by an older version, which stored the flag as a literal
+# "\U0001F1FA" escape (or a half-written \x byte) rather than the character.
+# Echoes the label to use.
+fix_label() {
+  local lbl=$1 cc=$2 txt
+  [[ $lbl == *\\* ]] || { printf '%s' "$lbl"; return 0; }
+  txt=$(printf '%s' "$lbl" \
+        | sed -e 's/\\U[0-9A-Fa-f]\{8\}//g' -e 's/\\x[0-9A-Fa-f]\{2\}//g' \
+              -e 's/[^[:print:]]//g' -e 's/^[[:space:]]*//')
+  printf '%s  %s' "$(cc_flag "$cc")" "$txt"
 }
 
 # Parse a WireGuard .conf. Prints TAB-separated: privkey pubkey endpoint_host endpoint_port address_present allowed_present
@@ -130,7 +149,15 @@ parse_conf() {
 # Validate parsed fields; echo "host<TAB>port" on success.
 validate_fields() {
   local priv=$1 pub=$2 host=$3 port=$4 hasaddr=$5 hasaip=$6
-  [[ $priv =~ ^[A-Za-z0-9+/]{42,43}=$ ]]       || die "config: bad or missing PrivateKey"
+  if [[ ! $priv =~ ^[A-Za-z0-9+/]{42,43}=$ ]]; then
+    # Providers hand out configs with the key field left as a fill-in-yourself
+    # placeholder (Surfshark ships "<insert_your_private_key_here>"). Name that
+    # case instead of calling the whole file malformed.
+    [[ -n $priv ]] || die "config: missing PrivateKey"
+    [[ $priv == *'<'* || $priv == *insert* || $priv == *[Yy][Oo][Uu][Rr]_* ]] \
+      && die "config: PrivateKey is still the provider's placeholder ($priv) — paste your own private key in"
+    die "config: bad PrivateKey (expected a 44-character base64 key)"
+  fi
   [[ $pub  =~ ^[A-Za-z0-9+/]{42,43}=$ ]]       || die "config: bad or missing peer PublicKey"
   [[ $hasaddr == 1 ]]                          || die "config: missing Interface Address"
   [[ $hasaip  == 1 ]]                          || die "config: missing peer AllowedIPs"
@@ -191,22 +218,37 @@ cmd_import() {
   [[ $real == "$inbox_real/"* ]]             || die "file escapes the inbox"
   [[ -f $real && ! -L $src ]]                || die "inbox entry is not a regular file"
 
-  local fields hp host port
+  local fields hp host port pubkey
   fields=$(parse_conf "$real")
   hp=$(validate_fields $fields)
   host=${hp%%$'\t'*}; port=${hp##*$'\t'}
+  pubkey=$(printf '%s' "$fields" | cut -f2)
 
-  local slug id iface epip
+  local slug base_slug id iface epip dup=1
   slug=$(slugify "${base%.conf}")
   [[ -n $slug ]]                             || die "could not derive a name from the filename"
+  base_slug=$slug
   id="${ID_PREFIX}${slug}"
 
-  iface="${IFACE_PREFIX}$(printf '%s' "$slug" | tr -cd 'a-z0-9' | cut -c1-9)"
-  local n=2
-  while ip link show "$iface" >/dev/null 2>&1 || nmcli -t -f connection.interface-name connection show "$iface" >/dev/null 2>&1; do
-    iface="${IFACE_PREFIX}$(printf '%s' "$slug" | tr -cd 'a-z0-9' | cut -c1-7)$n"
-    (( n++ < 20 )) || die "could not allocate an interface name"
+  # A tunnel's id comes from its filename, so two different configs that slug to
+  # the same name (two providers both shipping wg0.conf) would otherwise clobber
+  # each other — which matters now that a whole batch can be imported at once.
+  # Re-importing the *same* peer keeps its id, so that stays an update; a
+  # different peer under a taken name takes the next free -2 … -20 suffix.
+  local known
+  while [[ -f "$META_DIR/$id.json" ]]; do
+    known=$(jq -r '.pubkey // ""' "$META_DIR/$id.json" 2>/dev/null || true)
+    [[ -z $known || $known == "$pubkey" ]] && break
+    dup=$(( dup + 1 ))
+    (( dup <= 20 ))                          || die "too many tunnels named like $base_slug"
+    slug="${base_slug:0:36}"; slug="${slug%-}-$dup"
+    id="${ID_PREFIX}${slug}"
   done
+
+  # Interface name is derived from the id: deterministic (re-importing a tunnel
+  # keeps its device), unique because the id is, and inside IFNAMSIZ's 15
+  # characters. The kill switch matches tunnels on the ovpn- prefix alone.
+  iface="${IFACE_PREFIX}$(printf '%s' "$slug" | tr -cd 'a-z0-9' | cut -c1-6)$(printf '%s' "$id" | sha256sum | cut -c1-4)"
 
   epip=$(resolve_addr "$host")
   [[ -n $epip ]]                             || die "cannot resolve endpoint host: $host"
@@ -245,18 +287,23 @@ cmd_import() {
   # config would black-hole traffic with nothing to roll it back.
   nmcli connection down "$id" >/dev/null 2>&1 || true
 
-  local cc citycode label
-  cc=$(printf '%s' "$slug" | grep -oE '^[a-z]{2}' || true)
-  citycode=$(printf '%s' "${slug#*-}" | tr -c 'a-z0-9' ' ' | awk '{print toupper($1)}')
+  # Only a leading two-letter *segment* counts as a country code, so "wg0" and
+  # "work" don't get flagged as Western Sahara / Wallis & Futuna. Derived from
+  # base_slug so a de-duplicated tunnel reads "US NYC (2)" rather than repeating
+  # the suffix.
+  local cc="" citycode label
+  [[ $base_slug =~ ^([a-z]{2})(-|$) ]] && cc=${BASH_REMATCH[1]}
+  citycode=$(printf '%s' "${base_slug#*-}" | tr -c 'a-z0-9' ' ' | awk '{print toupper($1)}')
   if [[ -n $cc ]]; then
     label="$(cc_flag "$cc")  ${cc^^}${citycode:+ $citycode}"
   else
-    label="$(cc_flag xx)  ${slug^^}"
+    label="$(cc_flag "")  ${base_slug^^}"
   fi
+  (( dup > 1 )) && label="$label ($dup)"
 
   jq -n --arg id "$id" --arg iface "$iface" --arg host "$host" \
-        --arg port "$port" --arg label "$label" --arg cc "$cc" \
-        '{id:$id,iface:$iface,endpoint_host:$host,endpoint_port:($port|tonumber),label:$label,cc:$cc,imported:(now|floor)}' \
+        --arg port "$port" --arg label "$label" --arg cc "$cc" --arg pub "$pubkey" \
+        '{id:$id,iface:$iface,endpoint_host:$host,endpoint_port:($port|tonumber),label:$label,cc:$cc,pubkey:$pub,imported:(now|floor)}' \
     > "$META_DIR/$id.json"
 
   if [[ $SET_KEEP_CONF == true ]]; then
@@ -271,28 +318,43 @@ cmd_import() {
   jq -n --arg id "$id" --arg label "$label" '{ok:true,id:$id,label:$label}'
 }
 
-cmd_import_all() {
-  shopt -s nullglob
-  local f base ok=0 fail=0 errs=()
-  for f in "$INBOX"/*.conf; do
-    base=$(basename -- "$f")
-    if out=$(cmd_import "$base" 2>&1); then
-      (( ok++ ))
+# Import a batch of inbox basenames and report on the whole batch, so the panel
+# can say "3 imported, 1 failed" with a reason per failure instead of stopping
+# at the first bad file.
+#   { ok, imported, failed, names: [label], errors: [{name, error}] }
+import_batch() {
+  local base out msg ok=0 fail=0 names=() errs=() names_json errs_json
+  for base in "$@"; do
+    [[ -n $base ]] || continue
+    if out=$(cmd_import "$base" 2>/dev/null); then
+      ok=$(( ok + 1 ))
+      names+=("$(jq -r '.label // ""' <<<"$out" 2>/dev/null || true)")
     else
-      (( fail++ ))
-      errs+=("$(jq -Rn --arg b "$base" --arg e "$out" '{basename:$b,error:$e}')")
+      fail=$(( fail + 1 ))
+      msg=$(jq -r '.error? // empty' <<<"$out" 2>/dev/null || true)
+      [[ -n $msg ]] || msg="import failed"
+      errs+=("$(jq -Rn --arg b "$base" --arg e "$msg" '{name:$b,error:$e}')")
     fi
   done
-  printf '%s\n' "${errs[@]:-}" | jq -sc --argjson ok "$ok" --argjson fail "$fail" \
-    '{ok:($fail==0), imported:$ok, failed:$fail, errors:map(select(.!=null))}'
+  names_json=$(printf '%s\n' "${names[@]:-}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  errs_json=$(printf '%s\n' "${errs[@]:-}" | jq -sc 'map(select(. != null))')
+  jq -n --argjson ok "$ok" --argjson fail "$fail" \
+        --argjson names "$names_json" --argjson errs "$errs_json" \
+    '{ok:($fail == 0), imported:$ok, failed:$fail, names:$names, errors:$errs}'
 }
 
-# Copy an arbitrary .conf into the inbox under a sanitised name, then import it.
-# Lets the UI accept a file from anywhere without the user hand-copying it into
-# ~/.config/omarchy/vpn/inbox/ first.
-cmd_import_file() {
-  local src=${1:-}
-  [[ -n $src ]]                         || die "usage: import-file <path>"
+cmd_import_all() {
+  shopt -s nullglob
+  local f bases=()
+  for f in "$INBOX"/*.conf; do bases+=("$(basename -- "$f")"); done
+  import_batch "${bases[@]:-}"
+}
+
+# Copy one arbitrary .conf into the inbox under a sanitised name. Echoes the
+# inbox basename it landed on; the caller imports it. Returns non-zero with a
+# JSON error if the file isn't a plausible WireGuard config.
+stage_in_inbox() {
+  local src=$1
   [[ $src = /* ]]                       || src="$PWD/$src"
   local real; real=$(realpath -e -- "$src" 2>/dev/null) || die "file not found: $src"
   [[ -f $real && -r $real ]]            || die "not a readable file: $src"
@@ -302,8 +364,11 @@ cmd_import_file() {
   # sanity-check it parses as WireGuard before it lands in the inbox. Run the
   # check in a subshell so parse_conf/validate_fields' own die() (which prints
   # and exits) stays contained and we emit one clean error here.
-  ( fields=$(parse_conf "$real" 2>/dev/null) && validate_fields $fields ) >/dev/null 2>&1 \
-    || die "that file does not look like a WireGuard config"
+  local check why
+  if ! check=$( ( fields=$(parse_conf "$real") && validate_fields $fields ) 2>/dev/null ); then
+    why=$(jq -r '.error? // empty' <<<"$(tail -n1 <<<"$check")" 2>/dev/null || true)
+    die "${why:-that file does not look like a WireGuard config}"
+  fi
 
   local base safe
   base=$(basename -- "$real"); base=${base%.[Cc][Oo][Nn][Ff]}; base=${base%.conf}
@@ -313,41 +378,78 @@ cmd_import_file() {
   safe=${safe:0:60}.conf
 
   install -m600 -- "$real" "$INBOX/$safe" || die "could not copy into the inbox"
-
-  # cmd_import removes the inbox file on success; if it fails, clean up the copy
-  # we just made so a rejected file does not linger in the inbox.
-  local out
-  if out=$(cmd_import "$safe"); then
-    printf '%s\n' "$out"
-  else
-    rm -f -- "$INBOX/$safe"
-    printf '%s\n' "$out"
-    exit 1
-  fi
+  printf '%s' "$safe"
 }
 
-# Pop a GUI file chooser (zenity), then import what was picked.
+# Copy .conf files from anywhere into the inbox and import them, so the UI can
+# accept a whole folder's worth of provider configs in one go without the user
+# hand-copying them into ~/.config/omarchy/vpn/inbox/ first.
+cmd_import_file() {
+  (( $# >= 1 ))                         || die "usage: import-file <path>..."
+  local src safe out msg bases=() ok=0 fail=0 names=() errs=() names_json errs_json
+  for src in "$@"; do
+    [[ -n $src ]] || continue
+    # Staging failures are per-file: one unreadable path shouldn't sink the batch.
+    if safe=$(stage_in_inbox "$src" 2>/dev/null); then
+      bases+=("$safe")
+    else
+      fail=$(( fail + 1 ))
+      msg=$(jq -r '.error? // empty' <<<"$safe" 2>/dev/null || true)
+      [[ -n $msg ]] || msg="could not read that file"
+      errs+=("$(jq -Rn --arg b "$(basename -- "$src")" --arg e "$msg" '{name:$b,error:$e}')")
+    fi
+  done
+
+  # cmd_import removes the inbox file on success; clean up the copies we made
+  # for files it rejected so nothing lingers in the inbox.
+  if (( ${#bases[@]} )); then
+    out=$(import_batch "${bases[@]}")
+    ok=$(jq -r '.imported' <<<"$out")
+    names+=("$(jq -r '.names[]' <<<"$out")")
+    fail=$(( fail + $(jq -r '.failed' <<<"$out") ))
+    while read -r safe; do
+      [[ -n $safe ]] && rm -f -- "$INBOX/$safe"
+    done < <(jq -r '.errors[].name' <<<"$out")
+    errs+=("$(jq -c '.errors[]' <<<"$out")")
+  fi
+
+  names_json=$(printf '%s\n' "${names[@]:-}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  errs_json=$(printf '%s\n' "${errs[@]:-}" | jq -sc 'map(select(. != null))')
+  jq -n --argjson ok "$ok" --argjson fail "$fail" \
+        --argjson names "$names_json" --argjson errs "$errs_json" \
+    '{ok:($fail == 0), imported:$ok, failed:$fail, names:$names, errors:$errs}'
+}
+
+# Pop a GUI file chooser (zenity), then import everything that was picked.
+# Multi-select: ctrl/shift-click, or Ctrl+A, in the chooser.
 cmd_pick_import() {
   have zenity || die "zenity is not installed — drop .conf files into ~/.config/omarchy/vpn/inbox/ instead"
-  local path
-  path=$(zenity --file-selection \
-           --title="Select a WireGuard .conf file" \
+  local picked paths=()
+  picked=$(zenity --file-selection --multiple --separator=$'\n' \
+           --title="Select WireGuard .conf files" \
            --file-filter="WireGuard config | *.conf *.CONF" \
            --file-filter="All files | *" 2>/dev/null) \
     || { jq -n '{ok:true,cancelled:true}'; return 0; }
-  [[ -n $path ]] || { jq -n '{ok:true,cancelled:true}'; return 0; }
-  cmd_import_file "$path"
+  [[ -n $picked ]] || { jq -n '{ok:true,cancelled:true}'; return 0; }
+  mapfile -t paths <<<"$picked"
+  cmd_import_file "${paths[@]}"
 }
 
 cmd_forget() {
   local id=${1:-}
   [[ $id =~ ^omarchy-vpn-[a-z0-9-]{1,40}$ ]] || die "invalid id"
-  nmcli -t -f NAME,TYPE connection show 2>/dev/null \
-    | grep -qx "$id:wireguard"                || die "not one of our tunnels"
-  nmcli connection down "$id" >/dev/null 2>&1 || true
-  nmcli connection delete "$id" >/dev/null    || die "delete failed"
+  local label="" known=false
+  [[ -f "$META_DIR/$id.json" ]] && { known=true; label=$(jq -r '.label // ""' "$META_DIR/$id.json" 2>/dev/null || true); }
+  if nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep -qx "$id:wireguard"; then
+    nmcli connection down "$id" >/dev/null 2>&1 || true
+    nmcli connection delete "$id" >/dev/null    || die "delete failed"
+  else
+    # NetworkManager has already lost it (removed by hand, profile wiped). Still
+    # drop our own copies so the tunnel disappears from the panel for good.
+    [[ $known == true ]]                        || die "not one of our tunnels"
+  fi
   rm -f -- "$META_DIR/$id.json" "$STORE/$id.conf"
-  jq -n '{ok:true}'
+  jq -n --arg label "$label" '{ok:true,forgot:$label}'
 }
 
 cmd_connect() {
@@ -496,6 +598,13 @@ cmd_status() {
       activating) sstate=activating ;;
       deactivating) sstate=deactivating ;;
     esac
+    local lbl fixed
+    lbl=$(jq -r '.label // ""' "$f")
+    fixed=$(fix_label "$lbl" "$(jq -r '.cc // ""' "$f")")
+    if [[ $fixed != "$lbl" ]]; then
+      jq --arg l "$fixed" '.label = $l' "$f" > "$f.tmp" \
+        && mv -- "$f.tmp" "$f" || rm -f -- "$f.tmp"
+    fi
     js=$(jq -c --arg s "$sstate" --arg dev "$dev2" '. + {state:$s, device:$dev}' "$f")
     servers+=("$js")
   done
@@ -533,7 +642,7 @@ case "${1:-status}" in
   inbox)       cmd_inbox ;;
   import)      cmd_import "${2:-}" ;;
   import-all)  cmd_import_all ;;
-  import-file) cmd_import_file "${2:-}" ;;
+  import-file) shift; cmd_import_file "$@" ;;
   pick-import) cmd_pick_import ;;
   forget)      cmd_forget "${2:-}" ;;
   connect)     cmd_connect "${2:-}" ;;

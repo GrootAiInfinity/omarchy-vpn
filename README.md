@@ -13,10 +13,19 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   kill switch is on but no tunnel is carrying traffic.
 - **Left-click** opens the panel: kill-switch toggle, tunnel list, inbox.
 - **Right-click** connects / disconnects the last-used tunnel.
-- **Import:** click **Import from file…** in the panel for a file chooser, or
-  drop WireGuard `.conf` files into `~/.config/omarchy/vpn/inbox/` and import
-  them from the panel. Each becomes a NetworkManager tunnel; the endpoint is
-  pinned to a resolved IP so the tunnel never needs DNS to connect.
+- **Import, one file or fifty:** click **Import .conf files…** in the panel and
+  select as many `.conf` files as you like (ctrl/shift-click, or Ctrl+A) — or
+  drop them into `~/.config/omarchy/vpn/inbox/` and import the lot from the
+  panel. Each becomes a NetworkManager tunnel; the endpoint is pinned to a
+  resolved IP so the tunnel never needs DNS to connect. The panel reports what
+  landed and gives a reason for every file it rejected, so one bad config never
+  sinks the batch. Two different configs that would take the same name (two
+  providers both shipping `wg0.conf`) get separate tunnels; re-importing the
+  same peer updates the tunnel in place instead of duplicating it.
+- **Pick a tunnel, drop a tunnel:** click any tunnel in the panel to connect it
+  (clicking the connected one disconnects), and the trash icon on its row to
+  delete it — once to arm, again within three seconds to confirm. The list gains
+  a search box past six tunnels, matching name, endpoint host or id.
 - **Connect with a safety net:** bringing a tunnel up runs a connectivity probe
   first, then re-checks after activation. A full-tunnel peer that activates but
   silently black-holes traffic (dead endpoint, bad key, expired credentials) is
@@ -36,7 +45,7 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
 
 - Omarchy shell (Quickshell-based bar)
 - `NetworkManager`, `jq`, `curl`, coreutils
-- `zenity` for the **Import from file…** chooser (the inbox-folder route works
+- `zenity` for the **Import .conf files…** chooser (the inbox-folder route works
   without it)
 - Kill switch only: `nftables`, `polkit` (`pkexec`)
 
@@ -53,15 +62,29 @@ omarchy plugin add https://github.com/GrootAiInfinity/omarchy-vpn.git --enable
 Adds the widget to the right side of the bar. Remove it with
 `omarchy plugin remove groot.vpn`, update with `omarchy plugin update groot.vpn`.
 
-### Add a server
+### Add servers
+
+Open the panel and click **Import .conf files…** — multi-select is on, so a
+provider's whole server pack can go in at once. Or stage them by hand:
 
 ```sh
 mkdir -p ~/.config/omarchy/vpn/inbox
-cp ~/Downloads/nz-akl.prod.conf ~/.config/omarchy/vpn/inbox/
+cp ~/Downloads/*.conf ~/.config/omarchy/vpn/inbox/
 ```
 
-Open the panel and click **Import**. The tunnel name is derived from the
-filename (`nz-akl.prod.conf` → `NZ AKL`).
+and click **Import N files from inbox**. The tunnel name is derived from the
+filename (`se-sto.prod.conf` → 🇸🇪 `SE STO`); a leading two-letter segment is
+read as a country code, anything else gets a globe.
+
+### Remove a server
+
+Click the trash icon on the tunnel's row (once to arm, again to confirm). It is
+brought down, deleted from NetworkManager, and its stored copy of the config and
+its private key are removed. From the CLI:
+
+```sh
+~/.config/omarchy/plugins/groot.vpn/vpn.sh forget omarchy-vpn-se-sto
+```
 
 ### Enable the kill switch
 

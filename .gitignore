@@ -1,0 +1,5 @@
+# Never commit provider configs or keys — they land in
+# ~/.config/omarchy/vpn/inbox/ and ~/.local/state/omarchy-vpn/, not here,
+# but this keeps a stray copy in the repo out of history.
+*.conf
+*.key

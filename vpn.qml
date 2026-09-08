@@ -6,7 +6,7 @@ import qs.Ui
 import qs.Commons
 
 // VPN bar module.
-//   Left click  - open the panel (servers, kill switch, inbox)
+//   Left click  - open the panel (tunnels, kill switch, import)
 //   Right click - connect / disconnect the last-used tunnel
 // Backend: vpn.sh, bundled alongside this file. Privileged bits go through
 // pkexec -> /usr/local/lib/omarchy-vpn/omarchy-vpn-helper (kill switch only).
@@ -36,9 +36,24 @@ Panel {
   property var st: ({})
   property string busyAction: ""      // non-empty while a mutation is running
   property string lastError: ""
+  property string lastNotice: ""      // transient "Imported 3 tunnels" line
   property string lastConnectedId: ""
+  property string filterText: ""      // tunnel-list search box
 
   readonly property var servers: st.servers || []
+  // The list gets long once a provider's whole server pack is imported, so it
+  // is searchable by name, endpoint host or id.
+  readonly property var filteredServers: {
+    var q = filterText.trim().toLowerCase()
+    if (q === "") return servers
+    var out = []
+    for (var i = 0; i < servers.length; i++) {
+      var s = servers[i]
+      var hay = (stripFlag(s.label) + " " + (s.endpoint_host || "") + " " + s.id).toLowerCase()
+      if (hay.indexOf(q) !== -1) out.push(s)
+    }
+    return out
+  }
   readonly property var activeId: st.active_id || null
   readonly property var activeServer: {
     for (var i = 0; i < servers.length; i++)
@@ -59,7 +74,7 @@ Panel {
   readonly property color fg: Color.popups.text
 
   // ---- bar glyph state ----
-  readonly property string barGlyph: "" // nf-fa-shield
+  readonly property string barGlyph: "" // nf-fa-shield
   readonly property color barColor: {
     if (activeServer) return "#3fb950"                       // connected
     if (strandedByKillswitch) return Color.urgent            // armed, no tunnel
@@ -126,6 +141,7 @@ Panel {
     if (root.busyAction || actionProc.running) return
     root.busyAction = tag
     root.lastError = ""
+    root.lastNotice = ""
     actionProc.command = ["bash", root.script].concat(args)
     actionProc.running = true
   }
@@ -154,16 +170,39 @@ Panel {
     } catch (e) { /* keep last good */ }
   }
 
+  // Import and delete both report on a batch now, so say what actually landed
+  // and give a reason per rejected file instead of one blunt error.
   function parseAction(text) {
     var d = null
     try { d = JSON.parse(text) } catch (e) {}
-    if (d && d.ok === false && d.error) root.lastError = String(d.error)
+    if (d && d.cancelled) {
+      // file chooser dismissed — nothing to report
+    } else if (d && d.imported !== undefined) {
+      var parts = []
+      if (d.imported > 0) parts.push("Imported " + d.imported + (d.imported === 1 ? " tunnel" : " tunnels"))
+      if (d.failed > 0) parts.push(d.failed + (d.failed === 1 ? " file rejected" : " files rejected"))
+      root.lastNotice = parts.length ? parts.join("  ·  ") : "Nothing to import"
+      if (d.errors && d.errors.length) {
+        var lines = []
+        for (var i = 0; i < d.errors.length; i++)
+          lines.push(String(d.errors[i].name) + " — " + String(d.errors[i].error))
+        root.lastError = lines.join("\n")
+      }
+      if (d.imported > 0) noticeTimer.restart()
+    } else if (d && d.ok === false && d.error) {
+      root.lastError = String(d.error)
+    } else if (d && d.forgot) {
+      root.lastNotice = "Deleted " + root.stripFlag(d.forgot)
+      noticeTimer.restart()
+    }
     root.busyAction = ""
     root.refresh()
   }
 
   Component.onCompleted: refresh()
   onOpenedChanged: if (opened) { refresh(); refreshIp() }
+
+  Timer { id: noticeTimer; interval: 6000; onTriggered: root.lastNotice = "" }
 
   Timer {
     interval: root.opened ? 2000 : 5000
@@ -259,6 +298,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // let the search box receive j/k/h/l/x/space instead of the panel cursor
+      blocked: filterField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function (d) { root.switchPanel(d) }
 
@@ -295,6 +336,28 @@ Panel {
                 font.pixelSize: Style.font.display
               }
             }
+          }
+
+          // -------------------------------------------------- notice strip
+          Rectangle {
+            width: parent.width
+            visible: root.lastNotice !== ""
+            implicitHeight: noticeText.implicitHeight + Style.space(12)
+            radius: Style.space(4)
+            color: Qt.rgba(0.25, 0.72, 0.31, 0.14)
+            border.width: 1
+            border.color: Qt.rgba(0.25, 0.72, 0.31, 0.4)
+            Text {
+              id: noticeText
+              anchors { fill: parent; margins: Style.space(6) }
+              textFormat: Text.PlainText
+              text: root.lastNotice
+              wrapMode: Text.WordWrap
+              color: root.fg
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+            MouseArea { anchors.fill: parent; onClicked: root.lastNotice = "" }
           }
 
           // -------------------------------------------------- error strip
@@ -402,7 +465,9 @@ Panel {
             PanelSeparator { width: parent.width; foreground: root.fg }
             SectionHead {
               title: "TUNNELS"
-              detail: root.servers.length + (root.servers.length === 1 ? " server" : " servers")
+              detail: root.filterText.trim() !== ""
+                      ? root.filteredServers.length + " of " + root.servers.length
+                      : root.servers.length + (root.servers.length === 1 ? " server" : " servers")
             }
 
             Text {
@@ -410,14 +475,43 @@ Panel {
               visible: root.servers.length === 0
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "No tunnels yet. Drop a WireGuard .conf into the inbox below."
+              text: "No tunnels yet. Import one or more WireGuard .conf files below."
+              color: Qt.darker(root.fg, 1.35)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            // Only worth the space once a provider's server pack is in.
+            TextField {
+              id: filterField
+              width: parent.width
+              visible: root.servers.length >= 6
+              placeholderText: "Search tunnels…"
+              foreground: root.fg
+              // one-way, field -> root: binding root.filterText back into `text`
+              // would be torn down the first time anything assigns to `text`.
+              onTextChanged: root.filterText = text
+              onVisibleChanged: if (!visible) text = ""   // a hidden box must not keep filtering
+              Keys.onEscapePressed: function (e) {
+                if (text !== "") text = ""
+                else keyCatcher.forceActiveFocus()
+                e.accepted = true
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.servers.length > 0 && root.filteredServers.length === 0
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "No tunnel matches that search."
               color: Qt.darker(root.fg, 1.35)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
 
             Repeater {
-              model: root.servers
+              model: root.filteredServers
               Rectangle {
                 id: row
                 required property var modelData
@@ -478,8 +572,12 @@ Panel {
                 Text {
                   id: delBtn
                   anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: Style.space(8) }
-                  text: confirmDel ? "delete?" : ""   // nf-fa-trash
+                  text: confirmDel ? "delete?" : ""   // nf-fa-trash
                   property bool confirmDel: false
+                  // Keep a real hit target even if the glyph ever goes missing
+                  // from the font: an empty Text is zero-width and unclickable.
+                  width: Math.max(implicitWidth, Style.space(12))
+                  horizontalAlignment: Text.AlignRight
                   color: confirmDel ? Color.urgent : Qt.darker(root.fg, 1.5)
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: confirmDel ? Style.font.caption : Style.font.body
@@ -511,8 +609,9 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "Import a WireGuard .conf from your provider (Surfshark, Mullvad, "
-                    + "ProtonVPN, self-hosted). You can also drop files into "
+              text: "Import WireGuard .conf files from your provider (Surfshark, Mullvad, "
+                    + "ProtonVPN, self-hosted) — pick as many as you like at once with "
+                    + "ctrl/shift-click. You can also drop files into "
                     + "~/.config/omarchy/vpn/inbox/ and import them from here."
               color: Qt.darker(root.fg, 1.35)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -520,7 +619,7 @@ Panel {
             }
             ActionButton {
               width: parent.width
-              label: root.busyAction === "import" ? "Importing…" : "Import from file…"
+              label: root.busyAction === "import" ? "Importing…" : "Import .conf files…"
               enabled: root.busyAction === ""
               accent: true
               onTriggered: root.pickConfig()
