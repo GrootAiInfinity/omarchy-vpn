@@ -1,0 +1,27 @@
+[Unit]
+Description=Omarchy VPN kill switch (fail-closed egress filter)
+Documentation=https://github.com/GrootAiInfinity/omarchy-vpn
+DefaultDependencies=no
+After=nftables.service systemd-sysctl.service
+Before=network-pre.target sysinit.target shutdown.target
+Conflicts=shutdown.target
+# Only engage when the user has enabled the kill switch.
+ConditionPathExists=/var/lib/omarchy-vpn/killswitch.enabled
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/omarchy-vpn/omarchy-vpn-helper killswitch sync
+ExecStop=/usr/sbin/nft delete table inet omarchy_vpn
+# harden the unit itself
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=network-pre.target

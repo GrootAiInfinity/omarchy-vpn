@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# install-system.sh — one-time system integration for the groot.vpn plugin.
+#
+# Run as root, once:   pkexec ~/.config/omarchy/plugins/groot.vpn/install-system.sh
+# (the widget's "Set up" button does exactly this).
+#
+# It only copies the four files in ./system/ to fixed system locations and
+# reloads the relevant daemons. No network access, no downloads, no eval.
+# Read it before you run it; re-running it is safe (idempotent).
+
+set -euo pipefail
+IFS=$'\n\t'
+umask 022
+export LC_ALL=C
+
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+SRC="$SELF_DIR/system"
+
+LIBDIR=/usr/local/lib/omarchy-vpn
+POLKIT_ACTION=/usr/share/polkit-1/actions/com.omarchy.vpn.policy
+DISPATCHER=/etc/NetworkManager/dispatcher.d/50-omarchy-vpn
+UNIT=/etc/systemd/system/omarchy-vpn-killswitch.service
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "must run as root (use pkexec or sudo)" >&2; exit 1; }
+
+for f in omarchy-vpn-helper com.omarchy.vpn.policy 50-omarchy-vpn omarchy-vpn-killswitch.service; do
+  [[ -f "$SRC/$f" ]] || { echo "missing source file: system/$f" >&2; exit 1; }
+done
+
+# refuse to install a tampered helper (very small sanity check, not a signature)
+head -n1 "$SRC/omarchy-vpn-helper" | grep -q '^#!/usr/bin/env bash' \
+  || { echo "system/omarchy-vpn-helper does not look like the shipped script" >&2; exit 1; }
+
+command -v nft   >/dev/null || { echo "nftables is required (pacman -S nftables)" >&2; exit 1; }
+command -v nmcli >/dev/null || { echo "NetworkManager is required" >&2; exit 1; }
+
+install -d -m 0755 -o root -g root "$LIBDIR" /var/lib/omarchy-vpn
+install -m 0755 -o root -g root "$SRC/omarchy-vpn-helper"             "$LIBDIR/omarchy-vpn-helper"
+install -m 0644 -o root -g root "$SRC/com.omarchy.vpn.policy"         "$POLKIT_ACTION"
+install -D -m 0755 -o root -g root "$SRC/50-omarchy-vpn"              "$DISPATCHER"
+install -m 0644 -o root -g root "$SRC/omarchy-vpn-killswitch.service" "$UNIT"
+
+systemctl daemon-reload
+# dispatcher needs the service running to be useful; NM picks the script up live
+systemctl try-restart NetworkManager-dispatcher.service >/dev/null 2>&1 || true
+
+echo "omarchy-vpn: system integration installed."
+echo "  helper      $LIBDIR/omarchy-vpn-helper"
+echo "  polkit      $POLKIT_ACTION"
+echo "  dispatcher  $DISPATCHER"
+echo "  unit        $UNIT"
+echo "Nothing is enabled yet — turn the kill switch on from the VPN widget."

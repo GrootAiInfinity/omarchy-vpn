@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/omarchy/omarchy/main/schemas/plugin.json",
+  "schemaVersion": 1,
+  "id": "groot.vpn",
+  "name": "VPN",
+  "version": "1.0.0",
+  "author": "groot",
+  "license": "MIT",
+  "description": "WireGuard VPN control in the bar. Drop a .conf into the inbox, connect from a menu, and toggle a fail-closed nftables kill switch. Works with any WireGuard provider (Surfshark, Mullvad, self-hosted).",
+  "repository": "https://github.com/GrootAiInfinity/omarchy-vpn",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "vpn.qml"
+  },
+  "barWidget": {
+    "displayName": "VPN",
+    "description": "Connect / disconnect WireGuard tunnels and toggle a fail-closed kill switch. Left-click opens the panel, right-click toggles the last tunnel.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "publicIpLookup": true,
+      "publicIpUrl": "https://ipinfo.io/json",
+      "keepOriginalConfigs": true
+    },
+    "schema": [
+      {
+        "key": "publicIpLookup",
+        "type": "boolean",
+        "label": "Show public IP / location",
+        "defaultValue": true,
+        "description": "After connecting, query an external service to show your apparent IP and city. Turn off for maximum privacy (no third-party request)."
+      },
+      {
+        "key": "publicIpUrl",
+        "type": "string",
+        "label": "Public-IP service URL",
+        "defaultValue": "https://ipinfo.io/json",
+        "description": "HTTPS endpoint returning JSON with ip / city / country / org fields. Only used when the lookup above is enabled."
+      },
+      {
+        "key": "keepOriginalConfigs",
+        "type": "boolean",
+        "label": "Keep original .conf files",
+        "defaultValue": true,
+        "description": "Store a 0600 copy under ~/.local/state so a tunnel can be re-pinned to a fresh endpoint IP without re-uploading. If off, the upload is shredded after import and only NetworkManager keeps the key."
+      }
+    ]
+  }
+}

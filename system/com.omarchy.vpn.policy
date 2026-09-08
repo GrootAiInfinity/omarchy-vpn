@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+
+  <vendor>omarchy-vpn</vendor>
+  <vendor_url>https://github.com/GrootAiInfinity/omarchy-vpn</vendor_url>
+
+  <action id="com.omarchy.vpn.killswitch">
+    <description>Manage the omarchy-vpn kill switch</description>
+    <description xml:lang="en">Change the VPN kill switch (network egress filter)</description>
+    <message>Authentication is required to change the VPN kill switch.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/omarchy-vpn/omarchy-vpn-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>

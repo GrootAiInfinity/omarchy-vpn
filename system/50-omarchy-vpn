@@ -1,0 +1,29 @@
+#!/bin/sh
+# NetworkManager dispatcher hook for the groot.vpn plugin.
+#
+# Re-syncs the kill switch whenever one of our tunnel interfaces (ovpn-*)
+# changes state, so the endpoint allow-list tracks reconnections and the
+# rules are re-asserted after a link flap. Runs as root, non-interactively.
+#
+# Installed root:root 0755 at /etc/NetworkManager/dispatcher.d/50-omarchy-vpn.
+
+set -eu
+
+iface="${1:-}"
+action="${2:-}"
+
+case "$iface" in
+    ovpn-*) ;;
+    *) exit 0 ;;
+esac
+
+# Only do anything when the user has actually enabled the kill switch.
+[ -e /var/lib/omarchy-vpn/killswitch.enabled ] || exit 0
+
+case "$action" in
+    up|down|vpn-up|vpn-down|dhcp4-change|dhcp6-change|connectivity-change)
+        /usr/local/lib/omarchy-vpn/omarchy-vpn-helper killswitch sync >/dev/null 2>&1 || true
+        ;;
+esac
+
+exit 0
