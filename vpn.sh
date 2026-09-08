@@ -552,10 +552,19 @@ cmd_killswitch() {
   [[ $want == on || $want == off ]] || die "usage: killswitch <on|off>"
   [[ -x $HELPER ]]                  || die "system integration not installed — run Setup first"
   have pkexec                       || die "pkexec not found (install polkit)"
-  if pkexec "$HELPER" killswitch "$want" >/dev/null 2>&1; then
+  # Keep the helper's stderr: it explains *why* a change was refused (e.g. a
+  # ruleset that failed validation), and swallowing it leaves the panel showing
+  # a bare "failed" that invites the user to just click again.
+  local err rc=0
+  err=$(pkexec "$HELPER" killswitch "$want" 2>&1 >/dev/null) || rc=$?
+  if (( rc == 0 )); then
     jq -n --arg s "$want" '{ok:true,killswitch:$s}'
+  elif (( rc == 126 || rc == 127 )); then
+    die "kill switch change was cancelled"
   else
-    die "kill switch change was cancelled or failed"
+    err=${err##*omarchy-vpn-helper: }
+    err=${err%%$'\n'*}
+    die "kill switch ${want} failed: ${err:-helper exited with status $rc}"
   fi
 }
 
@@ -616,6 +625,16 @@ cmd_status() {
   local inbox_count=0
   shopt -s nullglob; local ib=("$INBOX"/*.conf); inbox_count=${#ib[@]}
 
+  # `omarchy plugin update` refreshes the plugin folder but not the privileged
+  # helper under /usr/local/lib, so a fixed helper can sit on disk unused while
+  # the kill switch keeps failing. Flag the mismatch so the panel can offer to
+  # re-run Setup.
+  local helper_stale=false
+  if [[ $integration == true && -r "$PLUGIN_DIR/system/omarchy-vpn-helper" ]]; then
+    [[ $(sha256sum < "$PLUGIN_DIR/system/omarchy-vpn-helper" 2>/dev/null) \
+       == $(sha256sum < "$HELPER" 2>/dev/null) ]] || helper_stale=true
+  fi
+
   printf '%s\n' "${servers[@]:-}" | jq -sc \
     --argjson integration "$integration" \
     --arg ks_live "$ks_live" \
@@ -623,9 +642,11 @@ cmd_status() {
     --arg active_id "$active_id" \
     --argjson pubip "$pubip" \
     --argjson inbox_count "$inbox_count" \
+    --argjson helper_stale "$helper_stale" \
     --arg iplookup "$SET_IP_LOOKUP" \
     '{
        integration: $integration,
+       helper_stale: $helper_stale,
        killswitch: $ks_live,
        killswitch_persisted: $ks_persisted,
        active_id: (if $active_id == "null" then null else $active_id end),

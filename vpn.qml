@@ -61,6 +61,8 @@ Panel {
     return null
   }
   readonly property bool integration: st.integration === true
+  // Installed root helper differs from the one shipped in this plugin folder.
+  readonly property bool helperStale: st.helper_stale === true
   readonly property string ksState: st.killswitch || "unknown"   // on | off | unknown
   readonly property bool ksOn: ksState === "on"
   readonly property bool ksPersisted: st.killswitch_persisted === true
@@ -100,6 +102,7 @@ Panel {
       l.push("VPN off")
     }
     if (!integration) l.push("System integration not set up")
+    else if (helperStale) l.push("Root helper is out of date — re-run Setup")
     l.push("")
     l.push("Left click: panel   ·   Right click: toggle " + (lastConnectedId ? "last tunnel" : "VPN"))
     return l.join("\n")
@@ -385,7 +388,7 @@ Panel {
           // -------------------------------------------------- setup prompt
           Column {
             width: parent.width
-            visible: !root.integration
+            visible: !root.integration || root.helperStale
             spacing: Style.space(6)
             PanelSeparator { width: parent.width; foreground: root.fg }
             SectionHead { title: "SYSTEM INTEGRATION" }
@@ -393,16 +396,23 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "The kill switch needs a small root helper (nftables). This runs "
-                    + "install-system.sh once via a polkit prompt. Connecting to a VPN "
-                    + "works without it."
+              text: root.helperStale
+                    ? "The plugin has been updated but the root helper under "
+                      + "/usr/local/lib is still the old one — plugin updates cannot "
+                      + "replace it on their own. Re-run the installer to pick up the "
+                      + "new helper."
+                    : "The kill switch needs a small root helper (nftables). This runs "
+                      + "install-system.sh once via a polkit prompt. Connecting to a VPN "
+                      + "works without it."
               color: Qt.darker(root.fg, 1.3)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
             ActionButton {
               width: parent.width
-              label: root.busyAction === "setup" ? "Authorising…" : "Set up kill switch"
+              label: root.busyAction === "setup" ? "Authorising…"
+                     : root.helperStale ? "Update system integration"
+                     : "Set up kill switch"
               enabled: root.busyAction === ""
               accent: true
               onTriggered: root.runSetup()

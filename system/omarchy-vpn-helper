@@ -86,8 +86,11 @@ build_rules() {
 
   local portset set4 set6
   portset=$(printf '%s\n' "${ports[@]}" | sort -un | paste -sd, -)
-  set4=$(printf '%s\n' "${v4[@]:-}" | sed '/^$/d' | sort -u | paste -sd', ' -)
-  set6=$(printf '%s\n' "${v6[@]:-}" | sed '/^$/d' | sort -u | paste -sd', ' -)
+  # NB: paste -d takes a *cycling list* of delimiters, so -d', ' joins with
+  # "," then " " then "," ... — fine for two endpoints, invalid nft syntax from
+  # three on. Join with a comma only.
+  set4=$(printf '%s\n' "${v4[@]:-}" | sed '/^$/d' | sort -u | paste -sd, -)
+  set6=$(printf '%s\n' "${v6[@]:-}" | sed '/^$/d' | sort -u | paste -sd, -)
 
   {
     cat <<EOF

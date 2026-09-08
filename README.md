@@ -62,6 +62,11 @@ omarchy plugin add https://github.com/GrootAiInfinity/omarchy-vpn.git --enable
 Adds the widget to the right side of the bar. Remove it with
 `omarchy plugin remove groot.vpn`, update with `omarchy plugin update groot.vpn`.
 
+`omarchy plugin update` refreshes the plugin folder but cannot touch the root
+helper under `/usr/local/lib` — that needs a polkit prompt. When the two differ
+the panel says so and offers **Update system integration**; click it after any
+update that changed the kill switch helper.
+
 ### Add servers
 
 Open the panel and click **Import .conf files…** — multi-select is on, so a
