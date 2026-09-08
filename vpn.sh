@@ -53,18 +53,24 @@ chmod 700 "$STATE_HOME" "$STORE" "$RUN_DIR" 2>/dev/null || true
 die()  { printf '{"ok":false,"error":%s}\n' "$(jq -Rn --arg s "$*" '$s')"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# "Is the internet actually working right now?" — returns 0 if any check passes.
+# "Is the internet actually working right now?" — returns 0 if reachable.
 # `connect` uses this to catch a tunnel that activates but silently black-holes
 # every packet (a full-tunnel peer whose handshake never completes), so it can
-# roll the change back instead of leaving the machine offline. Deliberately
-# tests DNS + routing + TLS together, plus one DNS-independent path.
+# roll the change back instead of leaving the machine offline. Tests DNS +
+# routing + TLS together (one fast request, retried by the caller).
 net_probe() {
   have curl || return 0   # no curl -> can't tell; don't roll back blindly
   curl -fsS --max-time 3 --proto '=https' -o /dev/null \
-       https://connectivitycheck.gstatic.com/generate_204 2>/dev/null && return 0
-  curl -fsS --max-time 3 --proto '=https' -o /dev/null \
-       --resolve one.one.one.one:443:1.1.1.1 https://one.one.one.one/ 2>/dev/null && return 0
-  return 1
+       https://connectivitycheck.gstatic.com/generate_204 2>/dev/null
+}
+
+# Second opinion before a rollback: a DNS-independent path (pinned IP, still a
+# valid TLS name) so a tunnel that carries traffic but broke only DNS, or one
+# whose provider blocks the probe host, is not torn down by mistake.
+net_probe_dns_independent() {
+  have curl || return 0
+  curl -fsS --max-time 4 --proto '=https' -o /dev/null \
+       --resolve one.one.one.one:443:1.1.1.1 https://one.one.one.one/ 2>/dev/null
 }
 
 # Reduce a string to a safe slug: lowercase, [a-z0-9-] only, collapsed, trimmed.
@@ -324,7 +330,7 @@ cmd_connect() {
 
   # Fail-safe: if we had internet before, make sure we still do. A full-tunnel
   # WireGuard peer that never completes a handshake installs a default route and
-  # then swallows every packet (DNS included), so give it ~10s to prove itself
+  # then swallows every packet (DNS included), so give it ~12s to prove itself
   # and otherwise put things back exactly as they were.
   if [[ $pre_ok == 1 ]]; then
     local ok=0 i
@@ -332,13 +338,14 @@ cmd_connect() {
       net_probe && { ok=1; break; }
       sleep 1
     done
+    if [[ $ok == 0 ]] && net_probe_dns_independent; then ok=1; fi
     if [[ $ok == 0 ]]; then
       nmcli connection down "$id" >/dev/null 2>&1 || true
       if [[ -n $prev_active && $prev_active != "$id" ]]; then
         nmcli connection up "$prev_active" >/dev/null 2>&1 || true
       fi
       sleep 2   # let NetworkManager reinstate the physical default route
-      die "tunnel came up but no traffic passed within ~10s — rolled back so you stay online. Check the server's keys/endpoint or provider credentials."
+      die "tunnel came up but no traffic passed within ~12s — rolled back so you stay online. Check the server's keys/endpoint or provider credentials."
     fi
   fi
 
