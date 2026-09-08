@@ -313,7 +313,17 @@ cmd_import_file() {
   safe=${safe:0:60}.conf
 
   install -m600 -- "$real" "$INBOX/$safe" || die "could not copy into the inbox"
-  cmd_import "$safe"
+
+  # cmd_import removes the inbox file on success; if it fails, clean up the copy
+  # we just made so a rejected file does not linger in the inbox.
+  local out
+  if out=$(cmd_import "$safe"); then
+    printf '%s\n' "$out"
+  else
+    rm -f -- "$INBOX/$safe"
+    printf '%s\n' "$out"
+    exit 1
+  fi
 }
 
 # Pop a GUI file chooser (zenity), then import what was picked.
