@@ -237,6 +237,12 @@ cmd_import() {
     ipv6.method disabled \
     >/dev/null
 
+  # `nmcli connection import` activates the tunnel before we can set
+  # autoconnect=no. Put it back down — a tunnel only ever comes up through
+  # `connect`, which has the connectivity fail-safe. Otherwise importing a bad
+  # config would black-hole traffic with nothing to roll it back.
+  nmcli connection down "$id" >/dev/null 2>&1 || true
+
   local cc citycode label
   cc=$(printf '%s' "$slug" | grep -oE '^[a-z]{2}' || true)
   citycode=$(printf '%s' "${slug#*-}" | tr -c 'a-z0-9' ' ' | awk '{print toupper($1)}')
