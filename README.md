@@ -13,9 +13,10 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   kill switch is on but no tunnel is carrying traffic.
 - **Left-click** opens the panel: kill-switch toggle, tunnel list, inbox.
 - **Right-click** connects / disconnects the last-used tunnel.
-- **Import:** drop WireGuard `.conf` files into `~/.config/omarchy/vpn/inbox/`
-  and import them from the panel. Each becomes a NetworkManager tunnel; the
-  endpoint is pinned to a resolved IP so the tunnel never needs DNS to connect.
+- **Import:** click **Import from file…** in the panel for a file chooser, or
+  drop WireGuard `.conf` files into `~/.config/omarchy/vpn/inbox/` and import
+  them from the panel. Each becomes a NetworkManager tunnel; the endpoint is
+  pinned to a resolved IP so the tunnel never needs DNS to connect.
 - **Connect with a safety net:** bringing a tunnel up runs a connectivity probe
   first, then re-checks after activation. A full-tunnel peer that activates but
   silently black-holes traffic (dead endpoint, bad key, expired credentials) is
@@ -35,6 +36,8 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
 
 - Omarchy shell (Quickshell-based bar)
 - `NetworkManager`, `jq`, `curl`, coreutils
+- `zenity` for the **Import from file…** chooser (the inbox-folder route works
+  without it)
 - Kill switch only: `nftables`, `polkit` (`pkexec`)
 
 Connecting to a VPN works without the kill switch and without any system

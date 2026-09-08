@@ -4,6 +4,8 @@
 #   vpn.sh status                 One-line JSON snapshot for the widget.
 #   vpn.sh inbox                  JSON list of importable .conf files in the inbox.
 #   vpn.sh import <basename>      Import inbox/<basename> as a NetworkManager tunnel.
+#   vpn.sh import-file <path>     Copy any .conf into the inbox and import it.
+#   vpn.sh pick-import            GUI file chooser (zenity), then import-file.
 #   vpn.sh forget  <id>           Delete one of our tunnels (id must be omarchy-vpn-*).
 #   vpn.sh connect <id>           Re-pin the endpoint and bring the tunnel up.
 #   vpn.sh disconnect [<id>]      Bring one / all of our tunnels down.
@@ -285,6 +287,48 @@ cmd_import_all() {
     '{ok:($fail==0), imported:$ok, failed:$fail, errors:map(select(.!=null))}'
 }
 
+# Copy an arbitrary .conf into the inbox under a sanitised name, then import it.
+# Lets the UI accept a file from anywhere without the user hand-copying it into
+# ~/.config/omarchy/vpn/inbox/ first.
+cmd_import_file() {
+  local src=${1:-}
+  [[ -n $src ]]                         || die "usage: import-file <path>"
+  [[ $src = /* ]]                       || src="$PWD/$src"
+  local real; real=$(realpath -e -- "$src" 2>/dev/null) || die "file not found: $src"
+  [[ -f $real && -r $real ]]            || die "not a readable file: $src"
+  local sz; sz=$(stat -c%s -- "$real" 2>/dev/null || echo 0)
+  (( sz >= 1 && sz <= 65536 ))          || die "not a plausible WireGuard config (size)"
+
+  # sanity-check it parses as WireGuard before it lands in the inbox. Run the
+  # check in a subshell so parse_conf/validate_fields' own die() (which prints
+  # and exits) stays contained and we emit one clean error here.
+  ( fields=$(parse_conf "$real" 2>/dev/null) && validate_fields $fields ) >/dev/null 2>&1 \
+    || die "that file does not look like a WireGuard config"
+
+  local base safe
+  base=$(basename -- "$real"); base=${base%.[Cc][Oo][Nn][Ff]}; base=${base%.conf}
+  safe=$(printf '%s' "$base" | tr -c 'A-Za-z0-9._-' '-' | tr -s '-')
+  safe=${safe#-}; safe=${safe#.}; safe=${safe%-}
+  [[ $safe =~ ^[A-Za-z0-9] ]]           || safe="tunnel-$safe"
+  safe=${safe:0:60}.conf
+
+  install -m600 -- "$real" "$INBOX/$safe" || die "could not copy into the inbox"
+  cmd_import "$safe"
+}
+
+# Pop a GUI file chooser (zenity), then import what was picked.
+cmd_pick_import() {
+  have zenity || die "zenity is not installed — drop .conf files into ~/.config/omarchy/vpn/inbox/ instead"
+  local path
+  path=$(zenity --file-selection \
+           --title="Select a WireGuard .conf file" \
+           --file-filter="WireGuard config | *.conf *.CONF" \
+           --file-filter="All files | *" 2>/dev/null) \
+    || { jq -n '{ok:true,cancelled:true}'; return 0; }
+  [[ -n $path ]] || { jq -n '{ok:true,cancelled:true}'; return 0; }
+  cmd_import_file "$path"
+}
+
 cmd_forget() {
   local id=${1:-}
   [[ $id =~ ^omarchy-vpn-[a-z0-9-]{1,40}$ ]] || die "invalid id"
@@ -479,6 +523,8 @@ case "${1:-status}" in
   inbox)       cmd_inbox ;;
   import)      cmd_import "${2:-}" ;;
   import-all)  cmd_import_all ;;
+  import-file) cmd_import_file "${2:-}" ;;
+  pick-import) cmd_pick_import ;;
   forget)      cmd_forget "${2:-}" ;;
   connect)     cmd_connect "${2:-}" ;;
   disconnect)  cmd_disconnect "${2:-}" ;;

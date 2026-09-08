@@ -134,6 +134,7 @@ Panel {
   function disconnectAll()   { root.runAction(["disconnect"], "disconnect") }
   function forgetServer(id)  { root.runAction(["forget", id], "forget:" + id) }
   function importInbox()     { root.runAction(["import-all"], "import") }
+  function pickConfig()      { root.runAction(["pick-import"], "import") }
   function toggleKillswitch() { root.runAction(["killswitch", root.ksOn ? "off" : "on"], "killswitch") }
   function runSetup()        { root.runAction(["setup"], "setup") }
 
@@ -497,31 +498,39 @@ Panel {
             }
           }
 
-          // -------------------------------------------------- inbox
+          // -------------------------------------------------- add a tunnel
           Column {
             width: parent.width
             spacing: Style.space(6)
             PanelSeparator { width: parent.width; foreground: root.fg }
             SectionHead {
-              title: "INBOX"
-              detail: root.inboxCount > 0 ? root.inboxCount + " waiting" : "empty"
+              title: "ADD A TUNNEL"
+              detail: root.inboxCount > 0 ? root.inboxCount + " in inbox" : ""
             }
             Text {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "Drop WireGuard .conf files into  ~/.config/omarchy/vpn/inbox/  then import."
+              text: "Import a WireGuard .conf from your provider (Surfshark, Mullvad, "
+                    + "ProtonVPN, self-hosted). You can also drop files into "
+                    + "~/.config/omarchy/vpn/inbox/ and import them from here."
               color: Qt.darker(root.fg, 1.35)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
             ActionButton {
               width: parent.width
-              visible: root.inboxCount > 0
-              label: root.busyAction === "import" ? "Importing…"
-                     : "Import " + root.inboxCount + (root.inboxCount === 1 ? " config" : " configs")
+              label: root.busyAction === "import" ? "Importing…" : "Import from file…"
               enabled: root.busyAction === ""
               accent: true
+              onTriggered: root.pickConfig()
+            }
+            ActionButton {
+              width: parent.width
+              visible: root.inboxCount > 0
+              label: root.busyAction === "import" ? "Importing…"
+                     : "Import " + root.inboxCount + (root.inboxCount === 1 ? " file from inbox" : " files from inbox")
+              enabled: root.busyAction === ""
               onTriggered: root.importInbox()
             }
           }
