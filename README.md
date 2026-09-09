@@ -178,6 +178,18 @@ pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.
   kill switch's boot behaviour follow the option, so re-run **Update system
   integration** once — until you do, arming the kill switch still persists it
   across reboots and the panel says so.
+- **Upgrading from 1.2.x:** up to 1.2.2 the widget reconciled the after-a-reboot
+  option whenever the option *changed* — and the bar delivers a widget's saved
+  settings one event-loop turn after the widget is built, so that delivery
+  looked like a change. Every login therefore ran a reconcile, using the value
+  from before the delivery, and the mismatch it "found" was resolved by
+  unpersisting the kill switch: a root password prompt at every login, and a
+  machine that booted unfiltered no matter what the option said. 1.2.3 absorbs
+  the delivery as the baseline, never runs the privileged half at start-up, and
+  passes the setting to the backend as an argument instead of relying on an
+  environment binding that is not current when a change handler fires. No
+  re-run of **Update system integration** is needed — the fix is entirely in
+  the plugin's own files.
 - **Upgrading from 1.0.x:** the systemd unit shipped before 1.1.0 hooked itself
   onto `network-pre.target` alone. That target is passive — nothing on an Omarchy
   box pulls it in — so the unit was reported `enabled` yet never ran at boot, and

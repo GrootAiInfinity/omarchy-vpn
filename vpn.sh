@@ -10,7 +10,8 @@
 #   vpn.sh connect <id>           Re-pin the endpoint and bring the tunnel up.
 #   vpn.sh disconnect [<id>]      Bring one / all of our tunnels down.
 #   vpn.sh autoconnect            Restore the remembered tunnel (widget startup).
-#   vpn.sh apply-session          Reconcile everything the "restore after a
+#   vpn.sh apply-session [--flags-only] [true|false] [At boot|On login]
+#                                 Reconcile everything the "restore after a
 #                                 reboot" option owns: NetworkManager's
 #                                 autoconnect flags and whether the kill switch
 #                                 is armed for the next boot.
@@ -91,6 +92,36 @@ fi
 # AUTO_MODE (off | login | boot) keeps its original meaning: it is what the rest
 # of this script and the widget's status JSON work off.
 if [[ $REMEMBER == true ]]; then AUTO_MODE=$RESTORE_MODE; else AUTO_MODE=off; fi
+
+# Did the caller actually state the setting, or is REMEMBER just the default
+# above? An absent env is "the widget has not handed its settings over yet",
+# which is not the same as "the user wants nothing remembered" — and acting on
+# that guess is precisely how a login could silently unpersist the kill switch.
+if [[ -n $SET_REMEMBER || -n $SET_AUTOCONNECT ]]; then
+  REMEMBER_KNOWN=true
+else
+  REMEMBER_KNOWN=false
+fi
+
+# `apply-session` and `killswitch` also take the setting as an argument, and it
+# wins over the env. QML delivers Process.environment through a binding, and
+# when a property-change handler starts the process there is no guarantee the
+# chain cfgRemember -> backendEnv -> environment has been re-evaluated yet: it
+# had not, so the backend was handed the value from *before* the change at the
+# one moment it mattered. An argument is passed by value and cannot go stale.
+set_remember() {
+  case "${1,,}" in
+    true|yes|1)  REMEMBER=true ;;
+    false|no|0)  REMEMBER=false ;;
+    *) return 1 ;;
+  esac
+  REMEMBER_KNOWN=true
+  case "${2,,}" in
+    "on login"|on-login|login|session) RESTORE_MODE=login ;;
+    "at boot"|at-boot|boot)            RESTORE_MODE=boot ;;
+  esac
+  if [[ $REMEMBER == true ]]; then AUTO_MODE=$RESTORE_MODE; else AUTO_MODE=off; fi
+}
 
 umask 077
 mkdir -p "$INBOX" "$STORE" "$META_DIR" "$RUN_DIR"
@@ -705,14 +736,56 @@ cmd_autoconnect() {
 # just changed their mind about whether it should survive a reboot) instead of
 # firing on every settings save.
 cmd_apply_session() {
+  # --flags-only reconciles the free half and nothing else. The widget uses it
+  # at start-up, where a polkit dialog would be indefensible: the machine is
+  # already in whatever state the last session persisted, nobody asked for a
+  # change, and prompting for a root password on every login is the bug this
+  # option exists to prevent. A retention flag that disagrees with the setting
+  # is reported back instead, for the panel to show.
+  local flags_only=false
+  while [[ ${1:-} == --* ]]; do
+    case $1 in
+      --flags-only) flags_only=true ;;
+      *)            die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  if [[ -n ${1:-} ]]; then
+    set_remember "$1" "${2:-}" \
+      || die "usage: apply-session [--flags-only] [true|false] [At boot|On login]"
+  fi
+
   local ks_live=unknown ks_persisted=false want=""
   [[ -r $KS_LIVE ]] && ks_live=$(<"$KS_LIVE")
   [[ -e $KS_FLAG ]] && ks_persisted=true
+
+  # Only a stated setting may move the root-owned flag. Without one the honest
+  # answer is to leave both halves alone rather than infer an intent from a
+  # default and spend a password prompt enacting it.
+  if [[ $REMEMBER_KNOWN != true ]]; then
+    jq -n '{ok:true,skipped:"no setting supplied"}'
+    return 0
+  fi
 
   if [[ $REMEMBER == true && $ks_live == on && $ks_persisted == false ]]; then
     want=persist
   elif [[ $REMEMBER != true && $ks_persisted == true ]]; then
     want=unpersist
+  fi
+
+  # Start-up: apply the free half, report the other, prompt for nothing.
+  if [[ $flags_only == true ]]; then
+    apply_autostart_flags
+    jq -n --argjson remember "$REMEMBER" \
+          --arg mode "$AUTO_MODE" \
+          --arg id "$(read_id_file "$AUTO_FILE")" \
+          --arg ks "$want" \
+      '{ok: true,
+        remember: $remember,
+        autoconnect: $mode,
+        autostart_id: (if $id == "" then null else $id end),
+        killswitch_pending: (if $ks == "" then null else $ks end)}'
+    return 0
   fi
 
   # The privileged half goes first and aborts the whole command on failure, so
@@ -771,7 +844,12 @@ cmd_refresh_ip() {
 
 cmd_killswitch() {
   local want=${1:-}
-  [[ $want == on || $want == off ]] || die "usage: killswitch <on|off>"
+  [[ $want == on || $want == off ]] || die "usage: killswitch <on|off> [true|false]"
+  # Same reasoning as apply-session: an argument cannot be stale, and getting
+  # this wrong decides whether arming the switch also arms the next boot.
+  if [[ -n ${2:-} ]]; then
+    set_remember "$2" || die "usage: killswitch <on|off> [true|false]"
+  fi
   [[ -x $HELPER ]]                  || die "system integration not installed — run Setup first"
   have pkexec                       || die "pkexec not found (install polkit)"
 
@@ -949,9 +1027,9 @@ case "${1:-status}" in
   autoconnect) cmd_autoconnect ;;
   # apply-autostart: the pre-1.2.0 name, kept so an in-flight shell that still
   # has the old QML loaded does not start erroring after a plugin update.
-  apply-session|apply-autostart) cmd_apply_session ;;
+  apply-session|apply-autostart) shift; cmd_apply_session "$@" ;;
   refresh-ip)  cmd_refresh_ip ;;
-  killswitch)  cmd_killswitch "${2:-}" ;;
+  killswitch)  shift; cmd_killswitch "$@" ;;
   setup)       cmd_setup ;;
   *)           die "unknown command: ${1:-}" ;;
 esac

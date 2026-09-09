@@ -195,13 +195,50 @@ Panel {
   function forgetServer(id)  { root.runAction(["forget", id], "forget:" + id) }
   function importInbox()     { root.runAction(["import-all"], "import") }
   function pickConfig()      { root.runAction(["pick-import"], "import") }
-  function toggleKillswitch() { root.runAction(["killswitch", root.ksOn ? "off" : "on"], "killswitch") }
+  // The setting rides along by value for the same reason applySession passes it:
+  // it decides whether arming the switch also arms the next boot, and the env
+  // binding is not guaranteed to be current when the process starts.
+  function toggleKillswitch() {
+    root.runAction(["killswitch", root.ksOn ? "off" : "on",
+                    root.cfgRemember ? "true" : "false"], "killswitch")
+  }
   function runSetup()        { root.runAction(["setup"], "setup") }
   // Reconciling is the only way a change to the reboot option reaches the
   // things that actually implement it: NetworkManager's autoconnect flags and
   // the kill switch's boot-time flag. Only the second can need a polkit prompt,
   // and only when the switch is on and its retention actually has to change.
-  function applySession()    { root.runAction(["apply-session"], "session") }
+  function applySession() {
+    // The value goes on the command line, not just in the env. `environment` is
+    // a binding on the Process, and when a property-change handler starts that
+    // process there is no guarantee the chain cfgRemember -> backendEnv ->
+    // environment has been re-evaluated yet. It had not: the backend was handed
+    // the value from *before* the change, at the one moment it decides whether
+    // to persist or unpersist the kill switch. An argument cannot go stale.
+    var args = ["apply-session", root.cfgRemember ? "true" : "false", root.cfgRestoreMethod]
+    // A reconcile that arrives while something else is running used to be
+    // dropped on the floor by runAction's busy guard, so a click could quietly
+    // do nothing. Remember it and run it once the way is clear.
+    if (root.busyAction || actionProc.running) { root.sessionPending = true; return }
+    root.runAction(args, "session")
+  }
+  property bool sessionPending: false
+
+  // Start-up reconcile. It never prompts: the machine is already in whatever
+  // state the last session persisted, nobody asked for a change, and a polkit
+  // dialog on every login is the bug this replaces. Only NetworkManager's
+  // autoconnect flags — which cost nothing — are brought in line; a kill-switch
+  // flag that disagrees is reported for the panel to show, not silently fixed.
+  // Runs once per shell start. A widget with nothing saved in shell.json never
+  // gets a settings delivery to hang this off, so the start-up timer calls it
+  // too; whichever gets there first wins.
+  property bool sessionSynced: false
+  function syncSessionFlags() {
+    if (root.sessionSynced || sessionProc.running) return
+    root.sessionSynced = true
+    sessionProc.command = ["bash", root.script, "apply-session", "--flags-only",
+                           root.cfgRemember ? "true" : "false", root.cfgRestoreMethod]
+    sessionProc.running = true
+  }
 
   // The panel's option button writes straight into this widget's shell.json
   // entry — the same place the settings UI writes — so the choice is still
@@ -288,6 +325,7 @@ Panel {
     if (d && d.ok !== false && d.note) root.lastError = String(d.note)
     root.busyAction = ""
     root.refresh()
+    if (root.sessionPending) { root.sessionPending = false; Qt.callLater(root.applySession) }
   }
 
   // Run once per shell start, and again if the setting is turned on later.
@@ -300,16 +338,44 @@ Panel {
     autoProc.running = true
   }
 
+  // The bar hands a widget its saved settings one event-loop turn *after* the
+  // item is constructed (Bar.qml: onActiveItemChanged -> Qt.callLater(injectProps)),
+  // so Component.onCompleted — and `completed` with it — runs while this widget
+  // still holds its own empty defaults. The saved value then lands as a property
+  // *change*, indistinguishable from the user flipping the switch. Treating it
+  // as one made every login reconcile, and reconcile with the pre-delivery
+  // value: the kill switch was unpersisted and a root password demanded, on
+  // every single boot. So the delivery is absorbed as the baseline instead.
+  property bool settingsDelivered: false
+  property bool absorbingDelivery: false
+  onSettingsChanged: {
+    if (root.settingsDelivered) return
+    // The construction-time default is an empty object; the bar's delivery is
+    // the first one carrying anything. A widget with nothing saved never gets a
+    // non-empty one — and has no change to absorb either.
+    if (!root.settings || Object.keys(root.settings).length === 0) return
+    root.settingsDelivered = true
+    // The cfgRemember / cfgRestoreMethod changes this assignment triggers run
+    // before the event loop turns again, so the latch is still up for them and
+    // down again in time for a real change afterwards.
+    root.absorbingDelivery = true
+    Qt.callLater(function() {
+      root.absorbingDelivery = false
+      root.syncSessionFlags()
+    })
+  }
+
   // A settings change has to reach NetworkManager and the kill switch flag, and
   // switching restore *on* should take effect now rather than at the next login.
   onCfgRememberChanged: {
-    if (!root.completed) return
+    if (!root.completed || root.absorbingDelivery) return
     if (root.rememberReverting) { root.rememberReverting = false; return }
     root.applySession()
     if (!root.cfgRemember) root.autoStartDone = false
     else Qt.callLater(root.maybeAutoConnect)
   }
-  onCfgRestoreMethodChanged: if (root.completed && root.cfgRemember) root.applySession()
+  onCfgRestoreMethodChanged:
+    if (root.completed && !root.absorbingDelivery && root.cfgRemember) root.applySession()
 
   property bool completed: false
   Component.onCompleted: { refresh(); completed = true }
@@ -327,7 +393,7 @@ Panel {
   Timer {
     interval: 4000
     running: true; repeat: false
-    onTriggered: root.maybeAutoConnect()
+    onTriggered: { root.syncSessionFlags(); root.maybeAutoConnect() }
   }
   Timer {   // refresh public IP occasionally while the panel is open
     interval: 300000
@@ -347,6 +413,14 @@ Panel {
     stderr: StdioCollector { waitForEnd: true }
   }
   Process { id: ipProc; environment: root.backendEnv }
+  // Start-up reconcile. Separate from actionProc so it neither greys the panel
+  // nor loses a race with a user action; it cannot prompt, so nothing to report
+  // beyond refreshing what the panel shows.
+  Process {
+    id: sessionProc
+    environment: root.backendEnv
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.refresh() }
+  }
   // Deliberately not actionProc: bringing a tunnel up and proving it carries
   // traffic can take ~20s, and that must not grey out the whole panel.
   Process {
