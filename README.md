@@ -131,8 +131,12 @@ its private key are removed. From the CLI:
 ### Enable the kill switch
 
 Click **Set up kill switch** in the panel (one polkit prompt — runs
-`install-system.sh`, which only copies the four files in `system/` into place).
-Then toggle it on. Nothing is armed until you turn it on.
+`install-system.sh`, which only copies the four files in `system/` into place
+and restarts `NetworkManager-dispatcher.service` so the new dispatcher script
+is picked up). An existing file at any of those four paths that omarchy-vpn did
+not install is never overwritten — the script stops and names it (`VPN_FORCE=1`
+overrides). Then toggle the kill switch on. Nothing is armed until you turn it
+on.
 
 Remove the system integration with:
 

@@ -5,7 +5,11 @@
 # (the widget's "Set up" button does exactly this).
 #
 # It only copies the four files in ./system/ to fixed system locations and
-# reloads the relevant daemons. No network access, no downloads, no eval.
+# reloads the relevant daemons (systemd, and a restart of
+# NetworkManager-dispatcher.service so the new dispatcher script is picked up).
+# An existing file at any of those paths that omarchy-vpn did not install is
+# never overwritten — the script stops and names it. No network access, no
+# downloads, no eval.
 # Read it before you run it; re-running it is safe (idempotent).
 
 set -euo pipefail
@@ -30,6 +34,23 @@ done
 # refuse to install a tampered helper (very small sanity check, not a signature)
 head -n1 "$SRC/omarchy-vpn-helper" | grep -q '^#!/usr/bin/env bash' \
   || { echo "system/omarchy-vpn-helper does not look like the shipped script" >&2; exit 1; }
+
+# Refuse to clobber a file at one of these paths that belongs to something
+# else. Everything this script installs names omarchy-vpn in its own body, so a
+# destination that never mentions it was written by another package.
+guard_write() {
+  local dest=$1
+  [[ -e $dest ]] || return 0
+  grep -q 'omarchy-vpn' -- "$dest" 2>/dev/null && return 0
+  echo "refusing to overwrite $dest — it was not installed by omarchy-vpn" >&2
+  echo "  inspect it, move it aside and re-run, or set VPN_FORCE=1 to overwrite" >&2
+  [[ ${VPN_FORCE:-0} == 1 ]] || exit 1
+  echo "VPN_FORCE=1 — overwriting $dest" >&2
+}
+
+for dest in "$LIBDIR/omarchy-vpn-helper" "$POLKIT_ACTION" "$DISPATCHER" "$UNIT"; do
+  guard_write "$dest"
+done
 
 command -v nft   >/dev/null || { echo "nftables is required (pacman -S nftables)" >&2; exit 1; }
 command -v nmcli >/dev/null || { echo "NetworkManager is required" >&2; exit 1; }

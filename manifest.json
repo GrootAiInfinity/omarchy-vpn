@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "io.github.grootaiinfinity.vpn",
   "name": "VPN",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "groot",
   "license": "MIT",
   "description": "WireGuard VPN control in the bar. Drop a .conf into the inbox, connect from a menu, and toggle a fail-closed nftables kill switch. Works with any WireGuard provider (Surfshark, Mullvad, self-hosted).",
