@@ -178,6 +178,13 @@ pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.
   kill switch's boot behaviour follow the option, so re-run **Update system
   integration** once — until you do, arming the kill switch still persists it
   across reboots and the panel says so.
+- **Upgrading to 1.2.4:** 1.2.3 started passing the after-a-reboot setting to
+  the backend as an argument, and the kill switch toggle passed it as the only
+  one. The helper that reads it went on to expand a second, optional argument
+  unguarded, which under `set -u` is fatal — so every kill switch toggle from
+  the panel aborted before it reached `pkexec` and the switch simply would not
+  turn off (or on). Fixed in the plugin's own files; no re-run of **Update
+  system integration** is needed.
 - **Upgrading from 1.2.x:** up to 1.2.2 the widget reconciled the after-a-reboot
   option whenever the option *changed* — and the bar delivers a widget's saved
   settings one event-loop turn after the widget is built, so that delivery

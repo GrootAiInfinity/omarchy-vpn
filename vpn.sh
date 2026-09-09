@@ -116,7 +116,12 @@ set_remember() {
     *) return 1 ;;
   esac
   REMEMBER_KNOWN=true
-  case "${2,,}" in
+  # The restore method is optional: `killswitch` has no use for it and passes
+  # only the first argument. `set -u` makes a bare ${2,,} fatal in that case —
+  # which is exactly how every kill switch toggle from the widget died before
+  # it reached pkexec — so default it before expanding.
+  local method=${2:-}
+  case "${method,,}" in
     "on login"|on-login|login|session) RESTORE_MODE=login ;;
     "at boot"|at-boot|boot)            RESTORE_MODE=boot ;;
   esac
@@ -844,11 +849,12 @@ cmd_refresh_ip() {
 
 cmd_killswitch() {
   local want=${1:-}
-  [[ $want == on || $want == off ]] || die "usage: killswitch <on|off> [true|false]"
+  local usage="usage: killswitch <on|off> [true|false] [At boot|On login]"
+  [[ $want == on || $want == off ]] || die "$usage"
   # Same reasoning as apply-session: an argument cannot be stale, and getting
   # this wrong decides whether arming the switch also arms the next boot.
   if [[ -n ${2:-} ]]; then
-    set_remember "$2" || die "usage: killswitch <on|off> [true|false]"
+    set_remember "$2" "${3:-}" || die "$usage"
   fi
   [[ -x $HELPER ]]                  || die "system integration not installed — run Setup first"
   have pkexec                       || die "pkexec not found (install polkit)"
