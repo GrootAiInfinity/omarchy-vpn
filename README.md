@@ -66,10 +66,13 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   widget re-connects it when the shell starts, with the same connectivity check
   and roll-back a manual connect gets.
 
-  Changing the option reconciles both halves immediately. The
+  Changing the option reconciles both halves immediately, and it is the only
+  control involved — there is nothing else to confirm afterwards. The
   NetworkManager side is free; the kill switch's boot flag is root-owned, so it
-  costs one polkit prompt — and only when the switch is actually on and its
-  retention has to change.
+  costs one polkit prompt, and only when the switch is actually on and its
+  retention has to change. That reconcile is all-or-nothing: refuse or cancel
+  the prompt and the switch goes back to where it was, rather than leaving the
+  panel claiming a state the machine is not in.
 - **Public-IP check:** after connecting, optionally queries an external service
   to show your apparent exit IP and city. Off = no third-party request.
 - Only one of the plugin's tunnels is up at a time.

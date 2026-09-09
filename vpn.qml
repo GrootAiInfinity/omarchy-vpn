@@ -91,11 +91,6 @@ Panel {
   // "off" | "login" | "boot", normalised by the backend from the settings above.
   readonly property string autoMode: st.autoconnect || "off"
   readonly property bool autoOn: root.cfgRemember
-  // The kill switch is armed for the next boot but the option says start clean
-  // (or the other way round) — drift only reachable by editing shell.json while
-  // the shell is down, or by arming against an out-of-date root helper.
-  readonly property bool retentionMismatch:
-    root.integration && st.killswitch_retention_mismatch === true
   // The tunnel that will come back on its own. Cleared by an explicit disconnect.
   readonly property var autostartId: st.autostart_id || null
   readonly property var autostartServer: {
@@ -143,13 +138,12 @@ Panel {
     if (cfgRemember)
       l.push("After a reboot  " + (autostartServer ? stripFlag(autostartServer.label) : "nothing armed")
              + (autoMode === "boot" ? "  (at boot)" : "  (on login)")
-             + (ksOn ? "  ·  kill switch" : ""))
+             + (ksPersisted ? "  ·  kill switch" : ""))
     else if (activeServer || ksOn)
       l.push("After a reboot  starts clean")
     if (!integration) l.push("System integration not set up")
     else if (helperStale) l.push("System files are out of date — re-run Setup")
     else if (ksPending) l.push("Kill switch enabled but not loaded — re-run Setup")
-    else if (retentionMismatch) l.push("Kill switch boot setting does not match — open the panel")
     l.push("")
     l.push("Left click: panel   ·   Right click: toggle " + (lastConnectedId ? "last tunnel" : "VPN"))
     return l.join("\n")
@@ -222,11 +216,23 @@ Panel {
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
+  // A reconcile that needs root can be refused or cancelled. `apply-session`
+  // is all-or-nothing, so when that happens the honest thing is to put the
+  // setting back rather than leave the panel claiming a state the machine is
+  // not in — that contradiction is what a second "fix this" button would be
+  // papering over.
+  property bool rememberReverting: false
+  property bool rememberPrev: false
   function setRemember(on) {
     if (on === root.cfgRemember) return
+    root.rememberPrev = root.cfgRemember
     // Pin the method down at the same time: leaving it implicit would mean a
     // later change to the legacy key silently moved it.
     root.persistSettings({ rememberSession: on, restoreMethod: root.cfgRestoreMethod })
+  }
+  function revertRemember() {
+    root.rememberReverting = true
+    root.persistSettings({ rememberSession: root.rememberPrev, restoreMethod: root.cfgRestoreMethod })
   }
 
   function rightClickToggle() {
@@ -267,6 +273,7 @@ Panel {
       if (d.imported > 0) noticeTimer.restart()
     } else if (d && d.ok === false && d.error) {
       root.lastError = String(d.error)
+      if (root.busyAction === "session") root.revertRemember()
     } else if (d && d.forgot) {
       root.lastNotice = "Deleted " + root.stripFlag(d.forgot)
       noticeTimer.restart()
@@ -297,6 +304,7 @@ Panel {
   // switching restore *on* should take effect now rather than at the next login.
   onCfgRememberChanged: {
     if (!root.completed) return
+    if (root.rememberReverting) { root.rememberReverting = false; return }
     root.applySession()
     if (!root.cfgRemember) root.autoStartDone = false
     else Qt.callLater(root.maybeAutoConnect)
@@ -551,8 +559,7 @@ Panel {
             PanelSeparator { width: parent.width; foreground: root.fg }
             SectionHead {
               title: "KILL SWITCH"
-              detail: root.ksOn ? (root.strandedByKillswitch ? "blocking all traffic" : "armed")
-                      : root.ksPending ? "enabled, not loaded" : "off"
+              detail: root.ksPending ? "not loaded" : root.ksOn ? "armed" : "off"
             }
             Row {
               width: parent.width
@@ -571,39 +578,21 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: root.ksOn
-                      ? "Fail-closed: only the tunnel, LAN and the WireGuard handshake are allowed."
-                      : "When on, all traffic is blocked unless it goes through a tunnel."
+                text: root.ksOn ? "Only the tunnel, LAN and the WireGuard handshake get out."
+                                : "Blocks anything not going through a tunnel."
                 color: Qt.darker(root.fg, 1.35)
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
               }
             }
+            // Only the two states the user has to do something about. What the
+            // switch does at the next boot is the section below's business.
             Text {
               width: parent.width
-              visible: root.ksOn
+              visible: root.strandedByKillswitch
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              // Reports what the boot flag actually says, not what the option asks
-              // for: when the two disagree the banner below is what explains it,
-              // and this line contradicting it would just look broken.
-              text: root.ksPersisted
-                    ? "Loaded at boot before the network comes up, on every reboot, until "
-                      + "you turn this off."
-                    : "This session only — \u201cAfter a reboot\u201d is set to start clean, so the "
-                      + "next boot comes up unfiltered."
-              color: Qt.darker(root.fg, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-            Text {
-              width: parent.width
-              visible: root.ksPending
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "⚠  The kill switch is switched on but its rules are not loaded right "
-                    + "now, so traffic is not being filtered. Re-run the system "
-                    + "integration installer above to repair the boot-time unit."
+              text: "⚠  No tunnel connected — you are offline except on the local network."
               color: Color.urgent
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
@@ -611,11 +600,10 @@ Panel {
             }
             Text {
               width: parent.width
-              visible: root.strandedByKillswitch
+              visible: root.ksPending
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "⚠  Kill switch is on and no tunnel is connected — you have no internet "
-                    + "except on the local network. Connect a server below or turn it off."
+              text: "⚠  The rules are not loaded, so nothing is being filtered. Re-run Setup above."
               color: Color.urgent
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
@@ -639,97 +627,31 @@ Panel {
               spacing: Style.space(10)
               ActionButton {
                 width: (parent.width - Style.space(10)) / 2
-                label: root.busyAction === "session" ? "…"
-                       : root.cfgRemember ? "Start clean" : "Remember session"
+                label: root.busyAction === "session"
+                       ? "…" : (root.cfgRemember ? "Start clean" : "Remember session")
                 enabled: root.busyAction === ""
                 accent: !root.cfgRemember
                 onTriggered: root.setRemember(!root.cfgRemember)
               }
+              // Name what actually comes back. Describing the setting in the
+              // abstract would just make this section something to read twice.
               Text {
                 width: (parent.width - Style.space(10)) / 2
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: root.cfgRemember
-                      ? "The tunnel you were on and the kill switch come back by themselves."
-                      : "Every boot starts with no tunnel and the kill switch off."
+                text: {
+                  if (!root.cfgRemember) return "Starts with no tunnel and the kill switch off."
+                  var who = root.autostartServer ? root.stripFlag(root.autostartServer.label) : ""
+                  var ks = root.ksPersisted
+                  if (who && ks) return who + " and the kill switch come back."
+                  if (who) return who + " comes back."
+                  if (ks) return "The kill switch comes back — no tunnel armed yet."
+                  return "Nothing is running to come back yet."
+                }
                 color: Qt.darker(root.fg, 1.35)
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
-              }
-            }
-            // Spell out what today's state actually means for the next boot,
-            // rather than describing the setting in the abstract.
-            Text {
-              width: parent.width
-              visible: root.cfgRemember
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: {
-                var l = []
-                if (root.autostartServer) {
-                  var who = root.stripFlag(root.autostartServer.label)
-                  l.push(root.cfgRestoreMethod === "On login"
-                    ? "· " + who + " reconnects when the shell starts, with the same "
-                           + "connectivity check and roll-back a manual connect gets."
-                    : "· " + who + " comes up at boot, before you log in, and "
-                           + "re-establishes itself if it drops.")
-                } else {
-                  l.push("· No tunnel is armed yet — connect one and it becomes the "
-                       + "tunnel that comes back. Disconnecting by hand clears it again.")
-                }
-                l.push(root.integration
-                  ? (root.ksOn ? "· The kill switch stays armed, and its rules load before "
-                               + "the network does on every boot."
-                               : "· The kill switch is off and stays off.")
-                  : "· The kill switch is not installed.")
-                return l.join("\n")
-              }
-              color: Qt.darker(root.fg, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-            Text {
-              width: parent.width
-              visible: !root.cfgRemember && (root.activeServer || root.ksOn)
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "Nothing that is running now survives the reboot — not "
-                    + (root.activeServer ? root.stripFlag(root.activeServer.label) : "")
-                    + (root.activeServer && root.ksOn ? ", not " : "")
-                    + (root.ksOn ? "the kill switch" : "")
-                    + "."
-              color: Qt.darker(root.fg, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-            // Drift between the option and the root-owned flag that implements
-            // it. Reconciling needs an admin password, so it is offered rather
-            // than done behind the user's back on a routine status refresh.
-            Column {
-              width: parent.width
-              visible: root.retentionMismatch
-              spacing: Style.space(6)
-              Text {
-                width: parent.width
-                textFormat: Text.PlainText
-                wrapMode: Text.WordWrap
-                text: root.cfgRemember
-                      ? "⚠  The kill switch is on but is not armed for the next boot, so it "
-                        + "would not come back with the rest of the session."
-                      : "⚠  The kill switch is still armed for the next boot, so it would come "
-                        + "back even though this is set to start clean."
-                color: Color.urgent
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                font.bold: true
-              }
-              ActionButton {
-                width: parent.width
-                label: root.busyAction === "session" ? "Authorising…" : "Fix boot behaviour"
-                enabled: root.busyAction === ""
-                accent: true
-                onTriggered: root.applySession()
               }
             }
           }

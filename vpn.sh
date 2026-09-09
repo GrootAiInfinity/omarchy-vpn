@@ -705,9 +705,7 @@ cmd_autoconnect() {
 # just changed their mind about whether it should survive a reboot) instead of
 # firing on every settings save.
 cmd_apply_session() {
-  apply_autostart_flags
-
-  local ks_live=unknown ks_persisted=false want="" err=""
+  local ks_live=unknown ks_persisted=false want=""
   [[ -r $KS_LIVE ]] && ks_live=$(<"$KS_LIVE")
   [[ -e $KS_FLAG ]] && ks_persisted=true
 
@@ -717,36 +715,39 @@ cmd_apply_session() {
     want=unpersist
   fi
 
+  # The privileged half goes first and aborts the whole command on failure, so
+  # a refused or cancelled prompt leaves *nothing* changed. That is what lets
+  # the widget simply put the setting back, instead of showing the user a
+  # half-applied state and a second button to finish the job.
   if [[ -n $want ]]; then
     if [[ ! -x $HELPER ]]; then
-      err="system integration is not installed — run Setup first"; want=""
+      die "system integration is not installed — run Setup first"
     elif ! helper_supports "$want"; then
-      err="the installed root helper predates this plugin version — re-run Setup to change what the kill switch does at boot"; want=""
+      die "the installed root helper predates this plugin version — re-run Setup, then try again"
     elif ! have pkexec; then
-      err="pkexec not found (install polkit)"; want=""
-    else
-      local rc=0 out
-      out=$(pkexec "$HELPER" killswitch "$want" 2>&1 >/dev/null) || rc=$?
-      if (( rc == 126 || rc == 127 )); then
-        err="kill switch change was cancelled"; want=""
-      elif (( rc != 0 )); then
-        out=${out##*omarchy-vpn-helper: }; out=${out%%$'\n'*}
-        err=${out:-"helper exited with status $rc"}; want=""
-      fi
+      die "pkexec not found (install polkit)"
+    fi
+    local rc=0 out
+    out=$(pkexec "$HELPER" killswitch "$want" 2>&1 >/dev/null) || rc=$?
+    if (( rc == 126 || rc == 127 )); then
+      die "kill switch change was cancelled"
+    elif (( rc != 0 )); then
+      out=${out##*omarchy-vpn-helper: }; out=${out%%$'\n'*}
+      die "${out:-helper exited with status $rc}"
     fi
   fi
+
+  apply_autostart_flags
 
   jq -n --argjson remember "$REMEMBER" \
         --arg mode "$AUTO_MODE" \
         --arg id "$(read_id_file "$AUTO_FILE")" \
         --arg ks "$want" \
-        --arg err "$err" \
-    '{ok: ($err == ""),
+    '{ok: true,
       remember: $remember,
       autoconnect: $mode,
       autostart_id: (if $id == "" then null else $id end),
-      killswitch_change: (if $ks == "" then null else $ks end),
-      error: (if $err == "" then null else $err end)}'
+      killswitch_change: (if $ks == "" then null else $ks end)}'
 }
 
 cmd_refresh_ip() {
