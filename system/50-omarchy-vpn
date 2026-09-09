@@ -1,5 +1,5 @@
 #!/bin/sh
-# NetworkManager dispatcher hook for the groot.vpn plugin.
+# NetworkManager dispatcher hook for the io.github.grootaiinfinity.vpn plugin.
 #
 # Re-syncs the kill switch whenever one of our tunnel interfaces (ovpn-*)
 # changes state, so the endpoint allow-list tracks reconnections and the

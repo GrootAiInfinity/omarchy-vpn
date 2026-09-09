@@ -12,8 +12,8 @@ import qs.Commons
 // pkexec -> /usr/local/lib/omarchy-vpn/omarchy-vpn-helper (kill switch only).
 Panel {
   id: root
-  moduleName: "groot.vpn"
-  ipcTarget: "groot.vpn"
+  moduleName: "io.github.grootaiinfinity.vpn"
+  ipcTarget: "io.github.grootaiinfinity.vpn"
 
   readonly property string pluginDir: {
     var dir = String(Qt.resolvedUrl("."))

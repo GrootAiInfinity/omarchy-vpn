@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# omarchy-vpn-helper — the only privileged component of the groot.vpn plugin.
+# omarchy-vpn-helper — the only privileged component of the io.github.grootaiinfinity.vpn plugin.
 #
 # Installed root:root 0755 at /usr/local/lib/omarchy-vpn/omarchy-vpn-helper.
 # Invoked either:

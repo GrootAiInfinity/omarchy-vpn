@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# uninstall-system.sh — remove the groot.vpn system integration.
+# uninstall-system.sh — remove the io.github.grootaiinfinity.vpn system integration.
 #
-# Run as root:   pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
+# Run as root:   pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.sh
 #
 # Removes the kill switch, the helper, the polkit action, the dispatcher hook
 # and the systemd unit. It does NOT delete your NetworkManager tunnels — remove

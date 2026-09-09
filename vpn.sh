@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vpn.sh — unprivileged backend for the groot.vpn Omarchy plugin.
+# vpn.sh — unprivileged backend for the io.github.grootaiinfinity.vpn Omarchy plugin.
 #
 #   vpn.sh status                 One-line JSON snapshot for the widget.
 #   vpn.sh inbox                  JSON list of importable .conf files in the inbox.

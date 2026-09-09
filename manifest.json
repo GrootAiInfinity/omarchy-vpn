@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/omarchy/omarchy/main/schemas/plugin.json",
   "schemaVersion": 1,
-  "id": "groot.vpn",
+  "id": "io.github.grootaiinfinity.vpn",
   "name": "VPN",
   "version": "1.2.1",
   "author": "groot",

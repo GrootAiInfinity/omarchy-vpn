@@ -96,7 +96,8 @@ omarchy plugin add https://github.com/GrootAiInfinity/omarchy-vpn.git --enable
 ```
 
 Adds the widget to the right side of the bar. Remove it with
-`omarchy plugin remove groot.vpn`, update with `omarchy plugin update groot.vpn`.
+`omarchy plugin remove io.github.grootaiinfinity.vpn`, update with
+`omarchy plugin update io.github.grootaiinfinity.vpn`.
 
 `omarchy plugin update` refreshes the plugin folder but cannot touch the root
 helper under `/usr/local/lib` — that needs a polkit prompt. When the two differ
@@ -124,7 +125,7 @@ brought down, deleted from NetworkManager, and its stored copy of the config and
 its private key are removed. From the CLI:
 
 ```sh
-~/.config/omarchy/plugins/groot.vpn/vpn.sh forget omarchy-vpn-se-sto
+~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/vpn.sh forget omarchy-vpn-se-sto
 ```
 
 ### Enable the kill switch
@@ -136,7 +137,7 @@ Then toggle it on. Nothing is armed until you turn it on.
 Remove the system integration with:
 
 ```sh
-pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
+pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.sh
 ```
 
 ## Security model
@@ -161,7 +162,7 @@ pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
 - `vpn.qml` finds `vpn.sh` via `Qt.resolvedUrl(".")`.
 - `omarchy update` / `omarchy refresh shell` rewrites `shell.json` and drops the
   plugin's layout entry (the widget files survive). Re-run
-  `omarchy plugin enable groot.vpn` and `omarchy restart shell`.
+  `omarchy plugin enable io.github.grootaiinfinity.vpn` and `omarchy restart shell`.
 - The kill switch persists across reboots only while **Restore the last session
   after a reboot** is on. Turn it off from the panel (or
   `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.

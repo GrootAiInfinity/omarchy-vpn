@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# install-system.sh — one-time system integration for the groot.vpn plugin.
+# install-system.sh — one-time system integration for the io.github.grootaiinfinity.vpn plugin.
 #
-# Run as root, once:   pkexec ~/.config/omarchy/plugins/groot.vpn/install-system.sh
+# Run as root, once:   pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/install-system.sh
 # (the widget's "Set up" button does exactly this).
 #
 # It only copies the four files in ./system/ to fixed system locations and
