@@ -17,7 +17,7 @@
   "barWidget": {
     "displayName": "VPN",
     "description": "Connect / disconnect WireGuard tunnels, optionally restore the last session (tunnel + kill switch) after a reboot, and toggle a fail-closed kill switch. Left-click opens the panel, right-click toggles the last tunnel.",
-    "category": "Network",
+    "category": "Status",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
