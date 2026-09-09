@@ -40,9 +40,12 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   the **Restore the last session after a reboot** option below: with it on a
   systemd unit re-loads the rules before the network comes up; with it off the
   switch is armed for this session only. Either way a NetworkManager dispatcher
-  hook re-syncs the rules on link flaps. The endpoint allow-list is cached
-  so the boot-time load — which runs before NetworkManager exists — still opens
-  the handshake ports for tunnels on non-standard ports.
+  hook re-syncs the rules on link flaps. Every handshake exception is pinned to
+  an exact endpoint **address and port** pair — there is no port-only rule, so
+  no host other than a configured endpoint is reachable on any port. The
+  allow-list is cached (bounded, newest first) so the boot-time load — which
+  runs before NetworkManager exists — still admits the handshake, and so an
+  endpoint whose address rotates is not locked out.
 - **Restore the last session after a reboot (optional):** one switch, in the
   panel's **After a reboot** section and in the widget's settings, that owns
   everything outliving a reboot.
@@ -158,6 +161,10 @@ pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.
   querying NetworkManager as root. The generated ruleset is `nft -c`
   syntax-checked before it is applied, atomically, in its own table; `off`
   removes only that table and never touches other firewall rules.
+- The kill switch is default-deny and every exception names a concrete
+  destination. Addresses and ports are validated both when they enter the
+  endpoint cache and again when the ruleset is generated, so a stale or
+  hand-edited cache can neither inject nft syntax nor widen the filter.
 
 ## Notes
 
@@ -170,6 +177,13 @@ pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.
 - The kill switch persists across reboots only while **Restore the last session
   after a reboot** is on. Turn it off from the panel (or
   `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- **Upgrading to 1.3.0:** the kill switch no longer carries the two lenient
+  "handshake to any host" rules. Earlier versions allowed UDP to and from any
+  address on every configured endpoint port, which let traffic leave past the
+  filter — arbitrary DNS for a tunnel on port 53, QUIC for one on 443, and a
+  plain UDP channel on 51820. Exceptions are now bound to the endpoint's exact
+  address and port. Nothing to re-install: turn the switch off and on once (or
+  reboot) to regenerate the rules.
 - **Upgrading to 1.2.0:** the old `Reconnect the last-used tunnel` enum is
   replaced by the `Restore the last session after a reboot` switch plus a
   `How the tunnel is restored` enum. An existing *On login* / *At boot* setting

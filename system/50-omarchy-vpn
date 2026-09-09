@@ -12,13 +12,22 @@ set -eu
 iface="${1:-}"
 action="${2:-}"
 
-case "$iface" in
-    ovpn-*) ;;
-    *) exit 0 ;;
-esac
-
 # Only do anything when the user has actually enabled the kill switch.
 [ -e /var/lib/omarchy-vpn/killswitch.enabled ] || exit 0
+
+case "$iface" in
+    ovpn-*) ;;
+    *)
+        # Every handshake exception in the ruleset is pinned to a resolved
+        # endpoint address, so an empty allow-list means the tunnel cannot come
+        # up at all. That can only happen on a machine that armed the switch
+        # before any tunnel was ever configured; the tunnel interface does not
+        # exist yet, so a physical link coming up is the only chance to
+        # repopulate the list. Re-sync in that one case and stay out of the way
+        # otherwise.
+        [ -s /var/lib/omarchy-vpn/endpoints ] && exit 0
+        ;;
+esac
 
 case "$action" in
     up|down|vpn-up|vpn-down|dhcp4-change|dhcp6-change|connectivity-change)
