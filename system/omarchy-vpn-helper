@@ -30,6 +30,7 @@ UNIT=omarchy-vpn-killswitch.service
 STATE_DIR=/var/lib/omarchy-vpn
 RUN_DIR=/run/omarchy-vpn
 FLAG="$STATE_DIR/killswitch.enabled"
+ENDPOINTS="$STATE_DIR/endpoints"
 LIVE="$RUN_DIR/state"
 RULES="$RUN_DIR/killswitch.nft"
 
@@ -43,7 +44,28 @@ install -d -m 0755 -o root -g root "$RUN_DIR"
 
 # ---- discover our WireGuard endpoints straight from NetworkManager -----------
 # Emits "addr port" lines. Only connections whose id starts with omarchy-vpn-.
+#
+# The boot-time `sync` runs *before* NetworkManager (that is the whole point of
+# a kill switch), so nmcli has nothing to answer with and this comes back empty.
+# An empty allow-list would leave the handshake ports closed and make the VPN
+# unreachable on any non-standard port — a permanent lock-out. So every
+# successful discovery is cached, and an empty one falls back to the cache.
 discover_endpoints() {
+  local out
+  out=$(discover_endpoints_nm || true)
+  if [[ -n $out ]]; then
+    printf '%s\n' "$out" > "$ENDPOINTS.new" \
+      && chmod 0644 "$ENDPOINTS.new" \
+      && mv -f -- "$ENDPOINTS.new" "$ENDPOINTS"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # Cached lines are re-validated by build_rules like any other, so a stale or
+  # hand-edited cache cannot inject anything into the ruleset.
+  [[ -r $ENDPOINTS ]] && cat -- "$ENDPOINTS" || true
+}
+
+discover_endpoints_nm() {
   local ids id peers tok host port
   mapfile -t ids < <(
     nmcli -t -f NAME,TYPE connection show 2>/dev/null \
@@ -176,13 +198,15 @@ case "$verb" in
   on)
     apply
     : > "$FLAG"; chmod 0644 "$FLAG"
-    systemctl enable "$UNIT" >/dev/null 2>&1 || true
+    # --now so systemd's own view matches the rules that are already loaded;
+    # without it the unit sits "inactive" and never runs its ExecStop.
+    systemctl enable --now "$UNIT" >/dev/null 2>&1 || true
     log "kill switch ENABLED (persisted across reboots)"
     ;;
   off)
     remove
     rm -f "$FLAG"
-    systemctl disable "$UNIT" >/dev/null 2>&1 || true
+    systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
     log "kill switch DISABLED"
     ;;
   sync)

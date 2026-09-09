@@ -44,9 +44,31 @@ systemctl daemon-reload
 # dispatcher needs the service running to be useful; NM picks the script up live
 systemctl try-restart NetworkManager-dispatcher.service >/dev/null 2>&1 || true
 
+# Repair the enablement of an existing install. Versions up to 1.0.0 shipped a
+# unit that hooked itself onto network-pre.target, a passive target nothing on
+# an Omarchy box ever pulls in — so the unit was "enabled" and yet never ran at
+# boot, and the kill switch came back disarmed after every reboot. `reenable`
+# rewrites the symlinks from the [Install] section of the unit we just wrote.
+UNIT_NAME=omarchy-vpn-killswitch.service
+if [[ -e /var/lib/omarchy-vpn/killswitch.enabled ]] \
+   || systemctl is-enabled --quiet "$UNIT_NAME" 2>/dev/null; then
+  systemctl reenable "$UNIT_NAME" >/dev/null 2>&1 || true
+fi
+
+# If the user had the kill switch on, put the rules back now rather than making
+# them toggle it off and on again to recover from the boot that missed them.
+if [[ -e /var/lib/omarchy-vpn/killswitch.enabled ]]; then
+  systemctl start "$UNIT_NAME" >/dev/null 2>&1 \
+    || "$LIBDIR/omarchy-vpn-helper" killswitch sync || true
+fi
+
 echo "omarchy-vpn: system integration installed."
 echo "  helper      $LIBDIR/omarchy-vpn-helper"
 echo "  polkit      $POLKIT_ACTION"
 echo "  dispatcher  $DISPATCHER"
 echo "  unit        $UNIT"
-echo "Nothing is enabled yet — turn the kill switch on from the VPN widget."
+if [[ -e /var/lib/omarchy-vpn/killswitch.enabled ]]; then
+  echo "Kill switch is enabled and will be re-armed on every boot."
+else
+  echo "Nothing is enabled yet — turn the kill switch on from the VPN widget."
+fi

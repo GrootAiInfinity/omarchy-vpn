@@ -26,10 +26,12 @@ Panel {
   readonly property bool cfgIpLookup: setting("publicIpLookup", true)
   readonly property string cfgIpUrl: setting("publicIpUrl", "https://ipinfo.io/json")
   readonly property bool cfgKeepConf: setting("keepOriginalConfigs", true)
+  readonly property string cfgAutoConnect: setting("autoConnect", "Off")
   readonly property var backendEnv: ({
     "OMARCHY_VPN_PUBLICIPLOOKUP": cfgIpLookup ? "true" : "false",
     "OMARCHY_VPN_PUBLICIPURL": cfgIpUrl,
-    "OMARCHY_VPN_KEEPORIGINALCONFIGS": cfgKeepConf ? "true" : "false"
+    "OMARCHY_VPN_KEEPORIGINALCONFIGS": cfgKeepConf ? "true" : "false",
+    "OMARCHY_VPN_AUTOCONNECT": cfgAutoConnect
   })
 
   // ---- state ----
@@ -37,6 +39,8 @@ Panel {
   property string busyAction: ""      // non-empty while a mutation is running
   property string lastError: ""
   property string lastNotice: ""      // transient "Imported 3 tunnels" line
+  // Seeded from the backend so a right-click still offers the last tunnel after
+  // the shell (or the machine) has restarted.
   property string lastConnectedId: ""
   property string filterText: ""      // tunnel-list search box
 
@@ -67,6 +71,20 @@ Panel {
   readonly property bool ksOn: ksState === "on"
   readonly property bool ksPersisted: st.killswitch_persisted === true
   readonly property int inboxCount: Number(st.inbox_count) || 0
+
+  // "off" | "login" | "boot", normalised by the backend from the enum setting.
+  readonly property string autoMode: st.autoconnect || "off"
+  readonly property bool autoOn: autoMode !== "off"
+  // The tunnel that will come back on its own. Cleared by an explicit disconnect.
+  readonly property var autostartId: st.autostart_id || null
+  readonly property var autostartServer: {
+    for (var i = 0; i < servers.length; i++)
+      if (servers[i].id === autostartId) return servers[i]
+    return null
+  }
+  // The kill switch is enabled but its rules are not loaded — the state a
+  // missed boot leaves behind.
+  readonly property bool ksPending: ksPersisted && ksState !== "on"
   readonly property var pub: st.public || ({})
 
   // kill switch is armed but nothing is carrying traffic -> you are offline
@@ -101,8 +119,12 @@ Panel {
     } else {
       l.push("VPN off")
     }
+    if (autoOn && autostartServer)
+      l.push("Auto-connect  " + stripFlag(autostartServer.label)
+             + (autoMode === "boot" ? "  (at boot)" : "  (on login)"))
     if (!integration) l.push("System integration not set up")
-    else if (helperStale) l.push("Root helper is out of date — re-run Setup")
+    else if (helperStale) l.push("System files are out of date — re-run Setup")
+    else if (ksPending) l.push("Kill switch enabled but not loaded — re-run Setup")
     l.push("")
     l.push("Left click: panel   ·   Right click: toggle " + (lastConnectedId ? "last tunnel" : "VPN"))
     return l.join("\n")
@@ -156,6 +178,9 @@ Panel {
   function pickConfig()      { root.runAction(["pick-import"], "import") }
   function toggleKillswitch() { root.runAction(["killswitch", root.ksOn ? "off" : "on"], "killswitch") }
   function runSetup()        { root.runAction(["setup"], "setup") }
+  // Reconciling the NetworkManager autoconnect flags is the only way a change
+  // made in the settings UI reaches the connections themselves.
+  function applyAutostart()  { root.runAction(["apply-autostart"], "autostart") }
 
   function rightClickToggle() {
     if (activeServer) { disconnectAll(); return }
@@ -169,6 +194,7 @@ Panel {
       if (d && typeof d === "object") {
         root.st = d
         if (root.activeId) root.lastConnectedId = root.activeId
+        else if (!root.lastConnectedId && d.last_id) root.lastConnectedId = String(d.last_id)
       }
     } catch (e) { /* keep last good */ }
   }
@@ -202,7 +228,27 @@ Panel {
     root.refresh()
   }
 
-  Component.onCompleted: refresh()
+  // Run once per shell start, and again if the setting is turned on later.
+  property bool autoStartDone: false
+  function maybeAutoConnect() {
+    if (root.autoStartDone || autoProc.running) return
+    if (root.cfgAutoConnect === "Off") return
+    root.autoStartDone = true
+    autoProc.command = ["bash", root.script, "autoconnect"]
+    autoProc.running = true
+  }
+
+  // A settings change has to reach NetworkManager, and switching *to* an
+  // auto-connect mode should take effect now rather than at the next login.
+  onCfgAutoConnectChanged: {
+    if (!root.completed) return
+    root.applyAutostart()
+    if (root.cfgAutoConnect === "Off") root.autoStartDone = false
+    else Qt.callLater(root.maybeAutoConnect)
+  }
+
+  property bool completed: false
+  Component.onCompleted: { refresh(); completed = true }
   onOpenedChanged: if (opened) { refresh(); refreshIp() }
 
   Timer { id: noticeTimer; interval: 6000; onTriggered: root.lastNotice = "" }
@@ -211,6 +257,13 @@ Panel {
     interval: root.opened ? 2000 : 5000
     running: true; repeat: true; triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+  // Give the network a moment to come up before asking for a tunnel; at login
+  // wifi is often still associating.
+  Timer {
+    interval: 4000
+    running: true; repeat: false
+    onTriggered: root.maybeAutoConnect()
   }
   Timer {   // refresh public IP occasionally while the panel is open
     interval: 300000
@@ -230,6 +283,21 @@ Panel {
     stderr: StdioCollector { waitForEnd: true }
   }
   Process { id: ipProc; environment: root.backendEnv }
+  // Deliberately not actionProc: bringing a tunnel up and proving it carries
+  // traffic can take ~20s, and that must not grey out the whole panel.
+  Process {
+    id: autoProc
+    environment: root.backendEnv
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var d = null
+        try { d = JSON.parse(text) } catch (e) {}
+        if (d && d.ok === false && d.error) root.lastError = String(d.error)
+        root.refresh()
+      }
+    }
+  }
 
   // ================================================================ bar button
   Item {
@@ -397,10 +465,10 @@ Panel {
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
               text: root.helperStale
-                    ? "The plugin has been updated but the root helper under "
-                      + "/usr/local/lib is still the old one — plugin updates cannot "
-                      + "replace it on their own. Re-run the installer to pick up the "
-                      + "new helper."
+                    ? "The plugin has been updated but its root-owned system files "
+                      + "(helper, systemd unit, dispatcher hook) are still the old ones "
+                      + "— a plugin update cannot replace them on its own. Re-run the "
+                      + "installer to pick them up."
                     : "The kill switch needs a small root helper (nftables). This runs "
                       + "install-system.sh once via a polkit prompt. Connecting to a VPN "
                       + "works without it."
@@ -427,7 +495,8 @@ Panel {
             PanelSeparator { width: parent.width; foreground: root.fg }
             SectionHead {
               title: "KILL SWITCH"
-              detail: root.ksOn ? (root.strandedByKillswitch ? "blocking all traffic" : "armed") : "off"
+              detail: root.ksOn ? (root.strandedByKillswitch ? "blocking all traffic" : "armed")
+                      : root.ksPending ? "enabled, not loaded" : "off"
             }
             Row {
               width: parent.width
@@ -456,6 +525,30 @@ Panel {
             }
             Text {
               width: parent.width
+              visible: root.ksOn
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "Enabled at boot — the rules are loaded before the network comes up, "
+                    + "on every reboot, until you turn this off."
+              color: Qt.darker(root.fg, 1.35)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+            Text {
+              width: parent.width
+              visible: root.ksPending
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "⚠  The kill switch is switched on but its rules are not loaded right "
+                    + "now, so traffic is not being filtered. Re-run the system "
+                    + "integration installer above to repair the boot-time unit."
+              color: Color.urgent
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            Text {
+              width: parent.width
               visible: root.strandedByKillswitch
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
@@ -465,6 +558,38 @@ Panel {
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
               font.bold: true
+            }
+          }
+
+          // -------------------------------------------------- auto-connect
+          Column {
+            width: parent.width
+            visible: root.autoOn
+            spacing: Style.space(6)
+            PanelSeparator { width: parent.width; foreground: root.fg }
+            SectionHead {
+              title: "AUTO-CONNECT"
+              detail: root.autoMode === "boot" ? "at boot" : "on login"
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: {
+                if (!root.autostartServer)
+                  return "No tunnel remembered yet — connect one and it will come back "
+                       + "automatically from then on."
+                var who = root.stripFlag(root.autostartServer.label)
+                return root.autoMode === "boot"
+                  ? who + " is set to come up at boot, before you log in, and to "
+                        + "re-establish itself if it drops. Disconnecting by hand clears this."
+                  : who + " will be reconnected when the shell starts, with the same "
+                        + "connectivity check a manual connect gets. Disconnecting by hand "
+                        + "clears this."
+              }
+              color: Qt.darker(root.fg, 1.35)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
             }
           }
 
@@ -557,6 +682,26 @@ Panel {
                     color: root.fg
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.body
+                  }
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.autoOn && row.modelData.id === root.autostartId
+                    implicitWidth: autoTag.implicitWidth + Style.space(8)
+                    implicitHeight: autoTag.implicitHeight + Style.space(3)
+                    radius: Style.space(3)
+                    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                    border.width: 1
+                    border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+                    Text {
+                      id: autoTag
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: "AUTO"
+                      color: root.fg
+                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
                   }
                   Text {
                     anchors.verticalCenter: parent.verticalCenter

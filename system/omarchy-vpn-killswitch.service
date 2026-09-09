@@ -1,10 +1,20 @@
 [Unit]
 Description=Omarchy VPN kill switch (fail-closed egress filter)
 Documentation=https://github.com/GrootAiInfinity/omarchy-vpn
-DefaultDependencies=no
+
+# network-pre.target is a *passive* target: systemd only reaches it if some unit
+# in the boot transaction pulls it in. NetworkManager merely orders itself
+# After= it, so an earlier version of this unit — which relied on
+# WantedBy=network-pre.target alone — was "enabled" yet never ran on boot, and
+# the kill switch silently came back up disarmed after every reboot.
+#
+# The pattern below is the one nftables.service and firewalld use: hook boot
+# activation onto multi-user.target, pull network-pre.target in ourselves, and
+# order before it so the rules are loaded before any link is configured.
+Wants=network-pre.target
+Before=network-pre.target NetworkManager.service
 After=nftables.service systemd-sysctl.service
-Before=network-pre.target sysinit.target shutdown.target
-Conflicts=shutdown.target
+
 # Only engage when the user has enabled the kill switch.
 ConditionPathExists=/var/lib/omarchy-vpn/killswitch.enabled
 
@@ -12,7 +22,9 @@ ConditionPathExists=/var/lib/omarchy-vpn/killswitch.enabled
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/lib/omarchy-vpn/omarchy-vpn-helper killswitch sync
-ExecStop=/usr/sbin/nft delete table inet omarchy_vpn
+# "-": turning the switch off by hand already removed the table, and a stop
+# that fails would leave the unit in a failed state for no reason.
+ExecStop=-/usr/bin/nft delete table inet omarchy_vpn
 # harden the unit itself
 NoNewPrivileges=yes
 ProtectHome=yes
@@ -24,4 +36,4 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 
 [Install]
-WantedBy=network-pre.target
+WantedBy=multi-user.target

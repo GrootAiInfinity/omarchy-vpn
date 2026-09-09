@@ -9,6 +9,8 @@
 #   vpn.sh forget  <id>           Delete one of our tunnels (id must be omarchy-vpn-*).
 #   vpn.sh connect <id>           Re-pin the endpoint and bring the tunnel up.
 #   vpn.sh disconnect [<id>]      Bring one / all of our tunnels down.
+#   vpn.sh autoconnect            Restore the remembered tunnel (widget startup).
+#   vpn.sh apply-autostart        Reconcile NetworkManager autoconnect flags.
 #   vpn.sh refresh-ip             Refresh the cached public-IP / geo lookup.
 #   vpn.sh killswitch <on|off>    Toggle the kill switch (delegates to pkexec helper).
 #   vpn.sh setup                  Install system integration (delegates to pkexec).
@@ -34,6 +36,13 @@ INBOX="$CONF_HOME/inbox"
 STORE="$STATE_HOME/store"
 META_DIR="$STATE_HOME/servers"
 PUBIP_CACHE="$STATE_HOME/pubip.json"
+# Two separate pointers on purpose: LAST_FILE is "what did I use most recently"
+# and only ever changes when a tunnel actually comes up (it drives the bar's
+# right-click toggle across shell restarts). AUTO_FILE is "what should come back
+# on its own" — the same id, but cleared the moment the user disconnects by
+# hand, so an explicit disconnect is not undone at the next login or reboot.
+LAST_FILE="$STATE_HOME/last-tunnel"
+AUTO_FILE="$STATE_HOME/autostart"
 
 HELPER=/usr/local/lib/omarchy-vpn/omarchy-vpn-helper
 KS_LIVE=/run/omarchy-vpn/state
@@ -46,6 +55,14 @@ IFACE_PREFIX="ovpn-"
 SET_IP_LOOKUP="${OMARCHY_VPN_PUBLICIPLOOKUP:-true}"
 SET_IP_URL="${OMARCHY_VPN_PUBLICIPURL:-https://ipinfo.io/json}"
 SET_KEEP_CONF="${OMARCHY_VPN_KEEPORIGINALCONFIGS:-true}"
+SET_AUTOCONNECT="${OMARCHY_VPN_AUTOCONNECT:-Off}"
+
+# The setting is an enum of human labels; everything below works off AUTO_MODE.
+case "${SET_AUTOCONNECT,,}" in
+  "on login"|on-login|login|session) AUTO_MODE=login ;;
+  "at boot"|at-boot|boot)            AUTO_MODE=boot ;;
+  *)                                 AUTO_MODE=off ;;
+esac
 
 umask 077
 mkdir -p "$INBOX" "$STORE" "$META_DIR" "$RUN_DIR"
@@ -73,6 +90,59 @@ net_probe_dns_independent() {
   have curl || return 0
   curl -fsS --max-time 4 --proto '=https' -o /dev/null \
        --resolve one.one.one.one:443:1.1.1.1 https://one.one.one.one/ 2>/dev/null
+}
+
+# Probe with retries, then ask for the second opinion. Returns 0 if anything
+# proved the machine can still reach the internet.
+net_ok_within() {
+  local tries=${1:-3} gap=${2:-1} i
+  for (( i = 0; i < tries; i++ )); do
+    net_probe && return 0
+    (( i + 1 < tries )) && sleep "$gap"
+  done
+  net_probe_dns_independent
+}
+
+# A non-tunnel connection that is actually up. Proof there is a physical link to
+# fall back to before anything considers tearing a tunnel down.
+phys_active() {
+  nmcli -t -f NAME,TYPE,STATE connection show --active 2>/dev/null \
+    | awk -F: '$3=="activated" && $2!="wireguard" && $2!="loopback" {print $1; exit}'
+}
+
+# Read a tunnel id out of a pointer file, or nothing. Anything that is not one
+# of our ids is treated as absent rather than trusted.
+read_id_file() {
+  local v
+  [[ -r $1 ]] || return 0
+  v=$(head -c 200 -- "$1" 2>/dev/null | tr -d '\r\n \t')
+  [[ $v =~ ^omarchy-vpn-[a-z0-9-]{1,40}$ ]] || return 0
+  printf '%s' "$v"
+}
+write_id_file() { ( umask 077; printf '%s\n' "$2" > "$1" ); }
+
+# Nothing but NetworkManager's own connection.autoconnect can bring a tunnel up
+# before anyone logs in — the widget is not running yet — so "At boot" is
+# expressed as exactly one tunnel carrying autoconnect=yes. Every other mode
+# (and every other tunnel) is pinned back to no, which is also what a fresh
+# import gets.
+apply_autostart_flags() {
+  local want="" id cur
+  [[ $AUTO_MODE == boot ]] && want=$(read_id_file "$AUTO_FILE")
+  for id in $(nm_wg_ids); do
+    cur=$(nmcli -g connection.autoconnect connection show "$id" 2>/dev/null || printf 'no')
+    if [[ $id == "$want" ]]; then
+      [[ $cur == yes ]] && continue
+      # retries 0 = keep trying indefinitely; at boot the link underneath is
+      # usually not up yet on the first attempt.
+      nmcli connection modify "$id" \
+        connection.autoconnect yes connection.autoconnect-retries 0 >/dev/null 2>&1 || true
+    else
+      [[ $cur == no ]] && continue
+      nmcli connection modify "$id" connection.autoconnect no >/dev/null 2>&1 || true
+    fi
+  done
+  return 0
 }
 
 # Reduce a string to a safe slug: lowercase, [a-z0-9-] only, collapsed, trimmed.
@@ -287,6 +357,13 @@ cmd_import() {
   # config would black-hole traffic with nothing to roll it back.
   nmcli connection down "$id" >/dev/null 2>&1 || true
 
+  # The modify above reset autoconnect, so re-importing the tunnel that carries
+  # the boot arming would quietly disarm it. Put it back.
+  if [[ $AUTO_MODE == boot && $(read_id_file "$AUTO_FILE") == "$id" ]]; then
+    nmcli connection modify "$id" \
+      connection.autoconnect yes connection.autoconnect-retries 0 >/dev/null 2>&1 || true
+  fi
+
   # Only a leading two-letter *segment* counts as a country code, so "wg0" and
   # "work" don't get flagged as Western Sahara / Wallis & Futuna. Derived from
   # base_slug so a de-duplicated tunnel reads "US NYC (2)" rather than repeating
@@ -449,6 +526,11 @@ cmd_forget() {
     [[ $known == true ]]                        || die "not one of our tunnels"
   fi
   rm -f -- "$META_DIR/$id.json" "$STORE/$id.conf"
+  if [[ $(read_id_file "$AUTO_FILE") == "$id" ]]; then
+    rm -f -- "$AUTO_FILE"
+    apply_autostart_flags
+  fi
+  [[ $(read_id_file "$LAST_FILE") == "$id" ]] && rm -f -- "$LAST_FILE"
   jq -n --arg label "$label" '{ok:true,forgot:$label}'
 }
 
@@ -495,13 +577,7 @@ cmd_connect() {
   # then swallows every packet (DNS included), so give it ~12s to prove itself
   # and otherwise put things back exactly as they were.
   if [[ $pre_ok == 1 ]]; then
-    local ok=0 i
-    for i in 1 2 3; do
-      net_probe && { ok=1; break; }
-      sleep 1
-    done
-    if [[ $ok == 0 ]] && net_probe_dns_independent; then ok=1; fi
-    if [[ $ok == 0 ]]; then
+    if ! net_ok_within 3 1; then
       nmcli connection down "$id" >/dev/null 2>&1 || true
       if [[ -n $prev_active && $prev_active != "$id" ]]; then
         nmcli connection up "$prev_active" >/dev/null 2>&1 || true
@@ -510,6 +586,12 @@ cmd_connect() {
       die "tunnel came up but no traffic passed within ~12s — rolled back so you stay online. Check the server's keys/endpoint or provider credentials."
     fi
   fi
+
+  # It worked, so it is both the tunnel to re-offer on a right-click and the one
+  # to bring back on its own.
+  write_id_file "$LAST_FILE" "$id"
+  write_id_file "$AUTO_FILE" "$id"
+  apply_autostart_flags
 
   ( SET_IP_LOOKUP="$SET_IP_LOOKUP" SET_IP_URL="$SET_IP_URL" "$0" refresh-ip >/dev/null 2>&1 & ) || true
   jq -n --arg id "$id" '{ok:true,id:$id}'
@@ -524,8 +606,64 @@ cmd_disconnect() {
     local c
     for c in $(nm_wg_ids); do nmcli connection down "$c" >/dev/null 2>&1 || true; done
   fi
+  # Disconnecting by hand is a statement of intent: don't undo it at the next
+  # login or reboot. (Tunnels the *connect* path takes down to make room are not
+  # routed through here, so switching servers keeps auto-start armed.)
+  rm -f -- "$AUTO_FILE"
+  apply_autostart_flags
   ( SET_IP_LOOKUP="$SET_IP_LOOKUP" SET_IP_URL="$SET_IP_URL" "$0" refresh-ip >/dev/null 2>&1 & ) || true
   jq -n '{ok:true}'
+}
+
+# Called by the widget once per shell start, and by hand for testing.
+#
+#   "On login"  the widget is the only thing that can restore a tunnel, so bring
+#               the remembered one up through cmd_connect — endpoint re-pin and
+#               roll-back fail-safe included.
+#   "At boot"   NetworkManager already did it before anyone logged in. All that
+#               is left is the one failure NetworkManager cannot see: a tunnel
+#               that activated and then swallowed every packet.
+cmd_autoconnect() {
+  [[ $AUTO_MODE == off ]] && { jq -n '{ok:true,skipped:"off"}'; return 0; }
+
+  local active
+  active=$(nmcli -t -f NAME,TYPE,STATE connection show --active 2>/dev/null \
+    | awk -F: -v p="$ID_PREFIX" '$2=="wireguard" && index($1,p)==1 && $3=="activated" {print $1; exit}')
+
+  if [[ -n $active ]]; then
+    # Only probe when the answer would mean something: there has to be a
+    # physical link to fall back to, and the kill switch must not be the thing
+    # holding traffic down — otherwise a failed probe proves nothing and
+    # tearing the tunnel down would make things worse, not better.
+    local ks=""; [[ -r $KS_LIVE ]] && ks=$(<"$KS_LIVE")
+    if [[ $AUTO_MODE == boot && $ks != on && -n $(phys_active) ]] && ! net_ok_within 5 2; then
+      nmcli connection down "$active" >/dev/null 2>&1 || true
+      rm -f -- "$AUTO_FILE"
+      apply_autostart_flags
+      sleep 2   # let NetworkManager reinstate the physical default route
+      die "$active was brought up at boot but carried no traffic — disconnected it and turned auto-connect off so you stay online."
+    fi
+    write_id_file "$LAST_FILE" "$active"
+    jq -n --arg id "$active" '{ok:true,already:$id}'
+    return 0
+  fi
+
+  local want; want=$(read_id_file "$AUTO_FILE")
+  [[ -n $want ]] || { jq -n '{ok:true,skipped:"nothing remembered"}'; return 0; }
+  if [[ ! -f "$META_DIR/$want.json" ]]; then
+    rm -f -- "$AUTO_FILE"
+    jq -n '{ok:true,skipped:"remembered tunnel is gone"}'
+    return 0
+  fi
+  cmd_connect "$want"
+}
+
+# Re-assert the NetworkManager autoconnect flags — run whenever the setting
+# changes, since nothing else notices a change made in the plugin's settings UI.
+cmd_apply_autostart() {
+  apply_autostart_flags
+  jq -n --arg mode "$AUTO_MODE" --arg id "$(read_id_file "$AUTO_FILE")" \
+    '{ok:true,autoconnect:$mode,autostart_id:(if $id == "" then null else $id end)}'
 }
 
 cmd_refresh_ip() {
@@ -585,14 +723,14 @@ cmd_status() {
   [[ -e $KS_FLAG ]] && ks_persisted=true
 
   # active connection + per-connection state
-  declare -A STATE DEV
-  local line name typ dev st
-  while IFS=: read -r name typ dev st; do
+  declare -A STATE DEV AUTO
+  local name typ dev st ac
+  while IFS=: read -r name typ dev st ac; do
     [[ $typ == wireguard && $name == ${ID_PREFIX}* ]] || continue
-    STATE["$name"]=$st; DEV["$name"]=$dev
-  done < <(nmcli -t -f NAME,TYPE,DEVICE,STATE connection show 2>/dev/null)
+    STATE["$name"]=$st; DEV["$name"]=$dev; AUTO["$name"]=$ac
+  done < <(nmcli -t -f NAME,TYPE,DEVICE,STATE,AUTOCONNECT connection show 2>/dev/null)
 
-  local active_id=null servers=() f id meta st2 dev2 js
+  local active_id=null servers=() f id st2 dev2 js
   shopt -s nullglob
   for f in "$META_DIR"/*.json; do
     id=$(jq -r '.id' "$f" 2>/dev/null) || continue
@@ -614,7 +752,9 @@ cmd_status() {
       jq --arg l "$fixed" '.label = $l' "$f" > "$f.tmp" \
         && mv -- "$f.tmp" "$f" || rm -f -- "$f.tmp"
     fi
-    js=$(jq -c --arg s "$sstate" --arg dev "$dev2" '. + {state:$s, device:$dev}' "$f")
+    local ac2; ac2=${AUTO[$id]:-no}
+    js=$(jq -c --arg s "$sstate" --arg dev "$dev2" --argjson ac "$([[ $ac2 == yes ]] && echo true || echo false)" \
+         '. + {state:$s, device:$dev, nm_autoconnect:$ac}' "$f")
     servers+=("$js")
   done
 
@@ -625,18 +765,38 @@ cmd_status() {
   local inbox_count=0
   shopt -s nullglob; local ib=("$INBOX"/*.conf); inbox_count=${#ib[@]}
 
-  # `omarchy plugin update` refreshes the plugin folder but not the privileged
-  # helper under /usr/local/lib, so a fixed helper can sit on disk unused while
-  # the kill switch keeps failing. Flag the mismatch so the panel can offer to
-  # re-run Setup.
-  local helper_stale=false
-  if [[ $integration == true && -r "$PLUGIN_DIR/system/omarchy-vpn-helper" ]]; then
-    [[ $(sha256sum < "$PLUGIN_DIR/system/omarchy-vpn-helper" 2>/dev/null) \
-       == $(sha256sum < "$HELPER" 2>/dev/null) ]] || helper_stale=true
+  # `omarchy plugin update` refreshes the plugin folder but none of the root-owned
+  # system files, so a fixed helper — or a fixed systemd unit — can sit on disk
+  # unused while the kill switch keeps failing. Compare all four and flag the
+  # mismatch so the panel can offer to re-run Setup.
+  local helper_stale=false pair src dst
+  if [[ $integration == true ]]; then
+    for pair in \
+      "omarchy-vpn-helper:$HELPER" \
+      "omarchy-vpn-killswitch.service:/etc/systemd/system/omarchy-vpn-killswitch.service" \
+      "50-omarchy-vpn:/etc/NetworkManager/dispatcher.d/50-omarchy-vpn" \
+      "com.omarchy.vpn.policy:/usr/share/polkit-1/actions/com.omarchy.vpn.policy"
+    do
+      src="$PLUGIN_DIR/system/${pair%%:*}"; dst=${pair#*:}
+      [[ -r $src ]] || continue
+      [[ -r $dst ]] || { helper_stale=true; break; }
+      [[ $(sha256sum < "$src" 2>/dev/null) == $(sha256sum < "$dst" 2>/dev/null) ]] \
+        || { helper_stale=true; break; }
+    done
   fi
+
+  local last_id auto_id
+  last_id=$(read_id_file "$LAST_FILE")
+  auto_id=$(read_id_file "$AUTO_FILE")
+  # A pointer to a tunnel that has since been deleted is just noise in the UI.
+  [[ -n $last_id && -f "$META_DIR/$last_id.json" ]] || last_id=""
+  [[ -n $auto_id && -f "$META_DIR/$auto_id.json" ]] || auto_id=""
 
   printf '%s\n' "${servers[@]:-}" | jq -sc \
     --argjson integration "$integration" \
+    --arg autoconnect "$AUTO_MODE" \
+    --arg last_id "$last_id" \
+    --arg auto_id "$auto_id" \
     --arg ks_live "$ks_live" \
     --argjson ks_persisted "$ks_persisted" \
     --arg active_id "$active_id" \
@@ -649,6 +809,9 @@ cmd_status() {
        helper_stale: $helper_stale,
        killswitch: $ks_live,
        killswitch_persisted: $ks_persisted,
+       autoconnect: $autoconnect,
+       last_id: (if $last_id == "" then null else $last_id end),
+       autostart_id: (if $auto_id == "" then null else $auto_id end),
        active_id: (if $active_id == "null" then null else $active_id end),
        servers: (map(select(. != null)) | sort_by(.label)),
        public: $pubip,
@@ -668,6 +831,8 @@ case "${1:-status}" in
   forget)      cmd_forget "${2:-}" ;;
   connect)     cmd_connect "${2:-}" ;;
   disconnect)  cmd_disconnect "${2:-}" ;;
+  autoconnect) cmd_autoconnect ;;
+  apply-autostart) cmd_apply_autostart ;;
   refresh-ip)  cmd_refresh_ip ;;
   killswitch)  cmd_killswitch "${2:-}" ;;
   setup)       cmd_setup ;;

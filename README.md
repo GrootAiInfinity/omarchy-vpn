@@ -11,7 +11,8 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
 - **Compact bar readout:** country code + colour for the active tunnel, `KS`
   when the kill switch is armed, `off` otherwise. A pulsing icon warns when the
   kill switch is on but no tunnel is carrying traffic.
-- **Left-click** opens the panel: kill-switch toggle, tunnel list, inbox.
+- **Left-click** opens the panel: kill-switch toggle, auto-connect status,
+  tunnel list, inbox.
 - **Right-click** connects / disconnects the last-used tunnel.
 - **Import, one file or fifty:** click **Import .conf files…** in the panel and
   select as many `.conf` files as you like (ctrl/shift-click, or Ctrl+A) — or
@@ -35,8 +36,22 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   with `policy drop` on output — only the tunnels, the encrypted WireGuard
   handshake, loopback, IPv6 ND, LAN/CGNAT/link-local ranges and DHCP are
   allowed. All plaintext egress (including DNS) on the physical link is dropped
-  whenever no tunnel carries it. Survives reboots via a systemd unit; a
-  NetworkManager dispatcher hook re-syncs it on link flaps.
+  whenever no tunnel carries it. Armed state persists across reboots: a systemd
+  unit re-loads the rules before the network comes up, and a NetworkManager
+  dispatcher hook re-syncs them on link flaps. The endpoint allow-list is cached
+  so the boot-time load — which runs before NetworkManager exists — still opens
+  the handshake ports for tunnels on non-standard ports.
+- **Reconnect the last-used tunnel (optional):** the `Reconnect the last-used
+  tunnel` setting has three positions. *Off* — tunnels only come up when you ask.
+  *On login* — the widget re-connects the tunnel you last used when the shell
+  starts, going through the same connectivity check and roll-back a manual
+  connect gets. *At boot* — NetworkManager brings it up itself before anyone logs
+  in, and re-establishes it whenever it drops; this is the only option that
+  covers the gap between power-on and login, at the cost of connecting without
+  the roll-back safety net (the widget still checks once, at session start, and
+  backs the tunnel out if it came up carrying no traffic). Disconnecting by hand
+  clears the memory in either mode, so an explicit disconnect is never undone at
+  the next login or reboot. The armed tunnel is marked `AUTO` in the panel.
 - **Public-IP check:** after connecting, optionally queries an external service
   to show your apparent exit IP and city. Off = no third-party request.
 - Only one of the plugin's tunnels is up at a time.
@@ -128,6 +143,13 @@ pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
   `omarchy plugin enable groot.vpn` and `omarchy restart shell`.
 - The kill switch persists across reboots once armed. Turn it off from the panel
   (or `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- **Upgrading from 1.0.x:** the systemd unit shipped before 1.1.0 hooked itself
+  onto `network-pre.target` alone. That target is passive — nothing on an Omarchy
+  box pulls it in — so the unit was reported `enabled` yet never ran at boot, and
+  an armed kill switch came back **disarmed** after every reboot. 1.1.0 installs
+  the unit the way `nftables.service` does. `omarchy plugin update` cannot
+  replace root-owned files, so the panel flags the mismatch and you must re-run
+  **Update system integration** once (one polkit prompt) for the fix to land.
 
 ## License
 

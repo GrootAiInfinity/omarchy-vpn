@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "groot.vpn",
   "name": "VPN",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "groot",
   "license": "MIT",
   "description": "WireGuard VPN control in the bar. Drop a .conf into the inbox, connect from a menu, and toggle a fail-closed nftables kill switch. Works with any WireGuard provider (Surfshark, Mullvad, self-hosted).",
@@ -16,16 +16,29 @@
   },
   "barWidget": {
     "displayName": "VPN",
-    "description": "Connect / disconnect WireGuard tunnels and toggle a fail-closed kill switch. Left-click opens the panel, right-click toggles the last tunnel.",
+    "description": "Connect / disconnect WireGuard tunnels, reconnect the last-used tunnel automatically, and toggle a fail-closed kill switch that survives reboots. Left-click opens the panel, right-click toggles the last tunnel.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "publicIpLookup": true,
       "publicIpUrl": "https://ipinfo.io/json",
-      "keepOriginalConfigs": true
+      "keepOriginalConfigs": true,
+      "autoConnect": "Off"
     },
     "schema": [
+      {
+        "key": "autoConnect",
+        "type": "enum",
+        "label": "Reconnect the last-used tunnel",
+        "options": [
+          "Off",
+          "On login",
+          "At boot"
+        ],
+        "defaultValue": "Off",
+        "description": "Off: tunnels only come up when you ask. On login: the widget re-connects the last tunnel you used when the shell starts, with the same connectivity check and roll-back a manual connect gets. At boot: NetworkManager brings it up itself before anyone logs in and re-establishes it whenever it drops — the only option that covers the gap between power-on and login, but it connects without the roll-back safety net. Disconnecting by hand clears the memory in either mode."
+      },
       {
         "key": "publicIpLookup",
         "type": "boolean",
