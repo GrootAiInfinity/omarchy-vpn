@@ -78,9 +78,17 @@ fi
 
 # If the user had the kill switch on, put the rules back now rather than making
 # them toggle it off and on again to recover from the boot that missed them.
+#
+# Apply with the helper directly rather than relying on `systemctl start`: the
+# unit is Type=oneshot with RemainAfterExit=yes, so when it is already active
+# systemd treats a start as a no-op. After this script has just replaced the
+# helper, that would leave the *previously generated* ruleset loaded while the
+# new helper sits unused on disk — exactly the situation an upgrade that changes
+# the rules is meant to fix. Applying directly is atomic and idempotent; the
+# start afterwards only makes systemd's view agree with what is loaded.
 if [[ -e /var/lib/omarchy-vpn/killswitch.enabled ]]; then
-  systemctl start "$UNIT_NAME" >/dev/null 2>&1 \
-    || "$LIBDIR/omarchy-vpn-helper" killswitch sync || true
+  "$LIBDIR/omarchy-vpn-helper" killswitch sync || true
+  systemctl start "$UNIT_NAME" >/dev/null 2>&1 || true
 fi
 
 echo "omarchy-vpn: system integration installed."
