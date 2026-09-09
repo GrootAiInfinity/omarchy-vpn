@@ -584,7 +584,10 @@ Panel {
               visible: root.ksOn
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: root.cfgRemember
+              // Reports what the boot flag actually says, not what the option asks
+              // for: when the two disagree the banner below is what explains it,
+              // and this line contradicting it would just look broken.
+              text: root.ksPersisted
                     ? "Loaded at boot before the network comes up, on every reboot, until "
                       + "you turn this off."
                     : "This session only — \u201cAfter a reboot\u201d is set to start clean, so the "
