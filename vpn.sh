@@ -10,7 +10,10 @@
 #   vpn.sh connect <id>           Re-pin the endpoint and bring the tunnel up.
 #   vpn.sh disconnect [<id>]      Bring one / all of our tunnels down.
 #   vpn.sh autoconnect            Restore the remembered tunnel (widget startup).
-#   vpn.sh apply-autostart        Reconcile NetworkManager autoconnect flags.
+#   vpn.sh apply-session          Reconcile everything the "restore after a
+#                                 reboot" option owns: NetworkManager's
+#                                 autoconnect flags and whether the kill switch
+#                                 is armed for the next boot.
 #   vpn.sh refresh-ip             Refresh the cached public-IP / geo lookup.
 #   vpn.sh killswitch <on|off>    Toggle the kill switch (delegates to pkexec helper).
 #   vpn.sh setup                  Install system integration (delegates to pkexec).
@@ -55,14 +58,39 @@ IFACE_PREFIX="ovpn-"
 SET_IP_LOOKUP="${OMARCHY_VPN_PUBLICIPLOOKUP:-true}"
 SET_IP_URL="${OMARCHY_VPN_PUBLICIPURL:-https://ipinfo.io/json}"
 SET_KEEP_CONF="${OMARCHY_VPN_KEEPORIGINALCONFIGS:-true}"
-SET_AUTOCONNECT="${OMARCHY_VPN_AUTOCONNECT:-Off}"
+SET_REMEMBER="${OMARCHY_VPN_REMEMBERSESSION:-}"
+SET_RESTORE="${OMARCHY_VPN_RESTOREMETHOD:-At boot}"
+SET_AUTOCONNECT="${OMARCHY_VPN_AUTOCONNECT:-}"   # pre-1.2.0, see below
 
-# The setting is an enum of human labels; everything below works off AUTO_MODE.
-case "${SET_AUTOCONNECT,,}" in
-  "on login"|on-login|login|session) AUTO_MODE=login ;;
-  "at boot"|at-boot|boot)            AUTO_MODE=boot ;;
-  *)                                 AUTO_MODE=off ;;
-esac
+# One switch owns everything that outlives a reboot: the tunnel that comes back
+# and whether the kill switch is still armed when the machine starts. REMEMBER
+# false means a boot starts clean — no tunnel, no filter — whatever was running
+# at shutdown.
+#
+# Before 1.2.0 the only control was an `autoConnect` enum that carried its own
+# "Off" member and said nothing about the kill switch. Honour it when the new
+# option has never been written, so an existing "On login" / "At boot" setup
+# keeps behaving the way it did.
+if [[ -z $SET_REMEMBER ]]; then
+  case "${SET_AUTOCONNECT,,}" in
+    "on login"|on-login|login|session) REMEMBER=true;  RESTORE_MODE=login ;;
+    "at boot"|at-boot|boot)            REMEMBER=true;  RESTORE_MODE=boot ;;
+    *)                                 REMEMBER=false; RESTORE_MODE=boot ;;
+  esac
+else
+  case "${SET_REMEMBER,,}" in
+    true|yes|1) REMEMBER=true ;;
+    *)          REMEMBER=false ;;
+  esac
+  case "${SET_RESTORE,,}" in
+    "on login"|on-login|login|session) RESTORE_MODE=login ;;
+    *)                                 RESTORE_MODE=boot ;;
+  esac
+fi
+
+# AUTO_MODE (off | login | boot) keeps its original meaning: it is what the rest
+# of this script and the widget's status JSON work off.
+if [[ $REMEMBER == true ]]; then AUTO_MODE=$RESTORE_MODE; else AUTO_MODE=off; fi
 
 umask 077
 mkdir -p "$INBOX" "$STORE" "$META_DIR" "$RUN_DIR"
@@ -71,6 +99,14 @@ chmod 700 "$STATE_HOME" "$STORE" "$RUN_DIR" 2>/dev/null || true
 # ------------------------------------------------------------------ helpers
 die()  { printf '{"ok":false,"error":%s}\n' "$(jq -Rn --arg s "$*" '$s')"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# The root helper lives outside the plugin folder, so `omarchy plugin update`
+# cannot replace it: an older one can still be installed after this plugin has
+# moved on. Probe for the verb rather than firing a polkit prompt at a helper
+# that would only answer with a usage error.
+helper_supports() {
+  [[ -r $HELPER ]] && grep -qE "^[[:space:]]*${1}\)" "$HELPER" 2>/dev/null
+}
 
 # "Is the internet actually working right now?" — returns 0 if reachable.
 # `connect` uses this to catch a tunnel that activates but silently black-holes
@@ -658,12 +694,59 @@ cmd_autoconnect() {
   cmd_connect "$want"
 }
 
-# Re-assert the NetworkManager autoconnect flags — run whenever the setting
-# changes, since nothing else notices a change made in the plugin's settings UI.
-cmd_apply_autostart() {
+# Reconcile everything the "restore after a reboot" option owns — run whenever
+# that option changes, since nothing else notices a change made in the panel or
+# in the settings UI.
+#
+# Two halves. The NetworkManager autoconnect flags are free, so they are always
+# brought in line. The kill switch's boot behaviour lives in a root-owned flag,
+# so it is only touched when it actually disagrees with the setting: that keeps
+# the polkit prompt to the one case that needs it (the switch is on and the user
+# just changed their mind about whether it should survive a reboot) instead of
+# firing on every settings save.
+cmd_apply_session() {
   apply_autostart_flags
-  jq -n --arg mode "$AUTO_MODE" --arg id "$(read_id_file "$AUTO_FILE")" \
-    '{ok:true,autoconnect:$mode,autostart_id:(if $id == "" then null else $id end)}'
+
+  local ks_live=unknown ks_persisted=false want="" err=""
+  [[ -r $KS_LIVE ]] && ks_live=$(<"$KS_LIVE")
+  [[ -e $KS_FLAG ]] && ks_persisted=true
+
+  if [[ $REMEMBER == true && $ks_live == on && $ks_persisted == false ]]; then
+    want=persist
+  elif [[ $REMEMBER != true && $ks_persisted == true ]]; then
+    want=unpersist
+  fi
+
+  if [[ -n $want ]]; then
+    if [[ ! -x $HELPER ]]; then
+      err="system integration is not installed — run Setup first"; want=""
+    elif ! helper_supports "$want"; then
+      err="the installed root helper predates this plugin version — re-run Setup to change what the kill switch does at boot"; want=""
+    elif ! have pkexec; then
+      err="pkexec not found (install polkit)"; want=""
+    else
+      local rc=0 out
+      out=$(pkexec "$HELPER" killswitch "$want" 2>&1 >/dev/null) || rc=$?
+      if (( rc == 126 || rc == 127 )); then
+        err="kill switch change was cancelled"; want=""
+      elif (( rc != 0 )); then
+        out=${out##*omarchy-vpn-helper: }; out=${out%%$'\n'*}
+        err=${out:-"helper exited with status $rc"}; want=""
+      fi
+    fi
+  fi
+
+  jq -n --argjson remember "$REMEMBER" \
+        --arg mode "$AUTO_MODE" \
+        --arg id "$(read_id_file "$AUTO_FILE")" \
+        --arg ks "$want" \
+        --arg err "$err" \
+    '{ok: ($err == ""),
+      remember: $remember,
+      autoconnect: $mode,
+      autostart_id: (if $id == "" then null else $id end),
+      killswitch_change: (if $ks == "" then null else $ks end),
+      error: (if $err == "" then null else $err end)}'
 }
 
 cmd_refresh_ip() {
@@ -690,13 +773,32 @@ cmd_killswitch() {
   [[ $want == on || $want == off ]] || die "usage: killswitch <on|off>"
   [[ -x $HELPER ]]                  || die "system integration not installed — run Setup first"
   have pkexec                       || die "pkexec not found (install polkit)"
+
+  # "Restore after a reboot" decides whether arming the switch also arms the
+  # next boot. With it off the rules are loaded for this session only, so the
+  # machine comes back unfiltered exactly as the option promises. An older
+  # installed helper has no such verb; fall back to the persistent `on` rather
+  # than failing outright, and say so.
+  local verb=$want note=""
+  if [[ $want == on && $REMEMBER != true ]]; then
+    if helper_supports on-once; then
+      verb=on-once
+    else
+      note="the installed root helper predates this plugin version, so the kill switch will also come back after a reboot — re-run Setup to fix that"
+    fi
+  fi
+
   # Keep the helper's stderr: it explains *why* a change was refused (e.g. a
   # ruleset that failed validation), and swallowing it leaves the panel showing
   # a bare "failed" that invites the user to just click again.
   local err rc=0
-  err=$(pkexec "$HELPER" killswitch "$want" 2>&1 >/dev/null) || rc=$?
+  err=$(pkexec "$HELPER" killswitch "$verb" 2>&1 >/dev/null) || rc=$?
   if (( rc == 0 )); then
-    jq -n --arg s "$want" '{ok:true,killswitch:$s}'
+    jq -n --arg s "$want" \
+          --argjson persisted "$([[ $verb == on ]] && echo true || echo false)" \
+          --arg note "$note" \
+      '{ok:true, killswitch:$s, killswitch_persisted:$persisted,
+        note:(if $note == "" then null else $note end)}'
   elif (( rc == 126 || rc == 127 )); then
     die "kill switch change was cancelled"
   else
@@ -794,6 +896,8 @@ cmd_status() {
 
   printf '%s\n' "${servers[@]:-}" | jq -sc \
     --argjson integration "$integration" \
+    --argjson remember "$REMEMBER" \
+    --arg restore_mode "$RESTORE_MODE" \
     --arg autoconnect "$AUTO_MODE" \
     --arg last_id "$last_id" \
     --arg auto_id "$auto_id" \
@@ -809,6 +913,16 @@ cmd_status() {
        helper_stale: $helper_stale,
        killswitch: $ks_live,
        killswitch_persisted: $ks_persisted,
+       remember: $remember,
+       restore_mode: $restore_mode,
+       # True when the boot behaviour of the kill switch has drifted from the
+       # "restore after a reboot" option — reachable by editing shell.json while
+       # the shell is down, or by an `on` that landed on an older helper. The
+       # panel offers a one-click reconcile rather than prompting on its own.
+       killswitch_retention_mismatch:
+         (if $remember
+          then ($ks_live == "on" and ($ks_persisted | not))
+          else $ks_persisted end),
        autoconnect: $autoconnect,
        last_id: (if $last_id == "" then null else $last_id end),
        autostart_id: (if $auto_id == "" then null else $auto_id end),
@@ -832,7 +946,9 @@ case "${1:-status}" in
   connect)     cmd_connect "${2:-}" ;;
   disconnect)  cmd_disconnect "${2:-}" ;;
   autoconnect) cmd_autoconnect ;;
-  apply-autostart) cmd_apply_autostart ;;
+  # apply-autostart: the pre-1.2.0 name, kept so an in-flight shell that still
+  # has the old QML loaded does not start erroring after a plugin update.
+  apply-session|apply-autostart) cmd_apply_session ;;
   refresh-ip)  cmd_refresh_ip ;;
   killswitch)  cmd_killswitch "${2:-}" ;;
   setup)       cmd_setup ;;

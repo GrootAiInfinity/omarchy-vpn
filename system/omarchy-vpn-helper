@@ -8,7 +8,8 @@
 #   * directly by root from the systemd unit and the NetworkManager dispatcher.
 #
 # SECURITY MODEL
-#   - The only accepted invocation is:  omarchy-vpn-helper killswitch {on|off|sync|status}
+#   - The only accepted invocation is:
+#       omarchy-vpn-helper killswitch {on|on-once|off|persist|unpersist|sync|status}
 #     Anything else exits non-zero without touching the system.
 #   - It takes NO caller-supplied file paths, connection names, addresses or
 #     other free-form arguments. Everything it acts on it discovers itself by
@@ -189,25 +190,60 @@ remove() {
   printf 'off\n' > "$LIVE"; chmod 0644 "$LIVE"
 }
 
+# Whether the kill switch is loaded *now* (the nft table) and whether it comes
+# back *at the next boot* (this flag plus the enabled unit) are two independent
+# decisions. The plugin's "restore last session after a reboot" option drives
+# the second one, so both have to be settable without disturbing the first.
+persist() {
+  : > "$FLAG"; chmod 0644 "$FLAG"
+  # --now so systemd's own view matches the rules that are already loaded;
+  # without it the unit sits "inactive" and never runs its ExecStop.
+  systemctl enable --now "$UNIT" >/dev/null 2>&1 || true
+}
+unpersist() {
+  rm -f "$FLAG"
+  # Deliberately no --now: the live ruleset is a separate decision and stopping
+  # the unit would run its ExecStop, tearing the table down underneath a user
+  # who only asked for the boot behaviour to change.
+  systemctl disable "$UNIT" >/dev/null 2>&1 || true
+}
+
 # ---- dispatch -------------------------------------------------------------
-[[ ${1:-} == killswitch ]] || die "usage: omarchy-vpn-helper killswitch {on|off|sync|status}"
+USAGE="usage: omarchy-vpn-helper killswitch {on|on-once|off|persist|unpersist|sync|status}"
+[[ ${1:-} == killswitch ]] || die "$USAGE"
 verb=${2:-}
 [[ $# -le 2 ]]             || die "unexpected arguments"
 
 case "$verb" in
   on)
     apply
-    : > "$FLAG"; chmod 0644 "$FLAG"
-    # --now so systemd's own view matches the rules that are already loaded;
-    # without it the unit sits "inactive" and never runs its ExecStop.
-    systemctl enable --now "$UNIT" >/dev/null 2>&1 || true
+    persist
     log "kill switch ENABLED (persisted across reboots)"
+    ;;
+  on-once)
+    # Armed for this session only: the rules are loaded now, but the flag is
+    # gone and the unit is disabled, so the next boot comes up unfiltered.
+    apply
+    unpersist
+    log "kill switch ENABLED for this session only (gone after a reboot)"
     ;;
   off)
     remove
     rm -f "$FLAG"
     systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
     log "kill switch DISABLED"
+    ;;
+  persist)
+    # Arming the *next boot* only makes sense if the switch is on right now;
+    # otherwise the flag would resurrect a kill switch the user has turned off.
+    nft list table inet "$TABLE" >/dev/null 2>&1 \
+      || die "kill switch is not loaded — nothing to carry across a reboot"
+    persist
+    log "kill switch will now survive reboots"
+    ;;
+  unpersist)
+    unpersist
+    log "kill switch will no longer survive reboots"
     ;;
   sync)
     if [[ -e $FLAG ]]; then apply; log "kill switch re-synced"; else remove; fi
@@ -218,6 +254,6 @@ case "$verb" in
       "$([[ -e $FLAG ]] && echo true || echo false)"
     ;;
   *)
-    die "usage: omarchy-vpn-helper killswitch {on|off|sync|status}"
+    die "$USAGE"
     ;;
 esac

@@ -11,8 +11,8 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
 - **Compact bar readout:** country code + colour for the active tunnel, `KS`
   when the kill switch is armed, `off` otherwise. A pulsing icon warns when the
   kill switch is on but no tunnel is carrying traffic.
-- **Left-click** opens the panel: kill-switch toggle, auto-connect status,
-  tunnel list, inbox.
+- **Left-click** opens the panel: kill-switch toggle, the after-a-reboot
+  option, tunnel list, inbox.
 - **Right-click** connects / disconnects the last-used tunnel.
 - **Import, one file or fifty:** click **Import .conf files…** in the panel and
   select as many `.conf` files as you like (ctrl/shift-click, or Ctrl+A) — or
@@ -36,22 +36,40 @@ Works with any WireGuard provider (Surfshark, Mullvad, ProtonVPN, self-hosted).
   with `policy drop` on output — only the tunnels, the encrypted WireGuard
   handshake, loopback, IPv6 ND, LAN/CGNAT/link-local ranges and DHCP are
   allowed. All plaintext egress (including DNS) on the physical link is dropped
-  whenever no tunnel carries it. Armed state persists across reboots: a systemd
-  unit re-loads the rules before the network comes up, and a NetworkManager
-  dispatcher hook re-syncs them on link flaps. The endpoint allow-list is cached
+  whenever no tunnel carries it. Whether the armed state survives a reboot is
+  the **Restore the last session after a reboot** option below: with it on a
+  systemd unit re-loads the rules before the network comes up; with it off the
+  switch is armed for this session only. Either way a NetworkManager dispatcher
+  hook re-syncs the rules on link flaps. The endpoint allow-list is cached
   so the boot-time load — which runs before NetworkManager exists — still opens
   the handshake ports for tunnels on non-standard ports.
-- **Reconnect the last-used tunnel (optional):** the `Reconnect the last-used
-  tunnel` setting has three positions. *Off* — tunnels only come up when you ask.
-  *On login* — the widget re-connects the tunnel you last used when the shell
-  starts, going through the same connectivity check and roll-back a manual
-  connect gets. *At boot* — NetworkManager brings it up itself before anyone logs
-  in, and re-establishes it whenever it drops; this is the only option that
+- **Restore the last session after a reboot (optional):** one switch, in the
+  panel's **After a reboot** section and in the widget's settings, that owns
+  everything outliving a reboot.
+  - **On** — the tunnel you were connected to comes back by itself *and* the
+    kill switch stays armed across reboots. The armed tunnel is marked `AUTO`
+    in the panel.
+  - **Off** (default) — every boot starts clean: no tunnel is connected and the
+    kill switch is off, whatever was running when you shut down. Arming the kill
+    switch loads the rules for this session only.
+
+  Disconnecting a tunnel by hand clears it as the one to restore, so an explicit
+  disconnect is never undone at the next login or reboot. Switching a tunnel
+  does not (the tunnel that is taken down to make room keeps auto-start armed).
+
+  `How the tunnel is restored` picks the mechanism, and only matters while the
+  option is on. *At boot* (default) — NetworkManager brings the tunnel up before
+  anyone logs in and re-establishes it whenever it drops; the only option that
   covers the gap between power-on and login, at the cost of connecting without
   the roll-back safety net (the widget still checks once, at session start, and
-  backs the tunnel out if it came up carrying no traffic). Disconnecting by hand
-  clears the memory in either mode, so an explicit disconnect is never undone at
-  the next login or reboot. The armed tunnel is marked `AUTO` in the panel.
+  backs the tunnel out if it came up carrying no traffic). *On login* — the
+  widget re-connects it when the shell starts, with the same connectivity check
+  and roll-back a manual connect gets.
+
+  Changing the option reconciles both halves immediately. The
+  NetworkManager side is free; the kill switch's boot flag is root-owned, so it
+  costs one polkit prompt — and only when the switch is actually on and its
+  retention has to change.
 - **Public-IP check:** after connecting, optionally queries an external service
   to show your apparent exit IP and city. Off = no third-party request.
 - Only one of the plugin's tunnels is up at a time.
@@ -127,8 +145,8 @@ pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
   and cannot escape the inbox.
 - The only privileged component is `omarchy-vpn-helper`
   (`/usr/local/lib/omarchy-vpn/`, root:root 0755). It accepts exactly one
-  invocation — `killswitch {on|off|sync|status}` — takes no caller-supplied
-  paths, names or addresses, and discovers the tunnel endpoints itself by
+  invocation — `killswitch {on|on-once|off|persist|unpersist|sync|status}` —
+  takes no caller-supplied paths, names or addresses, and discovers the tunnel endpoints itself by
   querying NetworkManager as root. The generated ruleset is `nft -c`
   syntax-checked before it is applied, atomically, in its own table; `off`
   removes only that table and never touches other firewall rules.
@@ -141,8 +159,17 @@ pkexec ~/.config/omarchy/plugins/groot.vpn/uninstall-system.sh
 - `omarchy update` / `omarchy refresh shell` rewrites `shell.json` and drops the
   plugin's layout entry (the widget files survive). Re-run
   `omarchy plugin enable groot.vpn` and `omarchy restart shell`.
-- The kill switch persists across reboots once armed. Turn it off from the panel
-  (or `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- The kill switch persists across reboots only while **Restore the last session
+  after a reboot** is on. Turn it off from the panel (or
+  `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- **Upgrading to 1.2.0:** the old `Reconnect the last-used tunnel` enum is
+  replaced by the `Restore the last session after a reboot` switch plus a
+  `How the tunnel is restored` enum. An existing *On login* / *At boot* setting
+  is read as the seed for the new one, so nothing changes under you; *Off* maps
+  to the new switch being off. The root helper gained the verbs that make the
+  kill switch's boot behaviour follow the option, so re-run **Update system
+  integration** once — until you do, arming the kill switch still persists it
+  across reboots and the panel says so.
 - **Upgrading from 1.0.x:** the systemd unit shipped before 1.1.0 hooked itself
   onto `network-pre.target` alone. That target is passive — nothing on an Omarchy
   box pulls it in — so the unit was reported `enabled` yet never ran at boot, and
