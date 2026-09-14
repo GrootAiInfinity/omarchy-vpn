@@ -133,22 +133,46 @@ its private key are removed. From the CLI:
 
 ### Enable the kill switch
 
-Click **Set up kill switch** in the panel (one polkit prompt — runs
-`install-system.sh`, which only copies the four files in `system/` into place
-and restarts `NetworkManager-dispatcher.service` so the new dispatcher script
-is picked up). An existing file at any of those four paths that omarchy-vpn did
-not install is never overwritten — the script stops and names it (`VPN_FORCE=1`
-overrides). Then toggle the kill switch on. Nothing is armed until you turn it
-on.
+Click **Set up kill switch** in the panel (one privilege prompt — runs
+`install-system.sh`, which copies the four files in `system/` plus a root-owned
+copy of the uninstaller into place and restarts
+`NetworkManager-dispatcher.service` so the new dispatcher script is picked up).
+Every one of those files is checked against a digest recorded in
+`install-system.sh` at release time before anything is written, so a plugin
+folder that does not hold the released files installs nothing at all. An
+existing file at any destination that omarchy-vpn did not install is never
+overwritten — the script stops and names it (`VPN_FORCE=1` overrides). Then
+toggle the kill switch on. Nothing is armed until you turn it on.
 
 Remove the system integration with:
 
 ```sh
-pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.sh
+pkexec /usr/local/lib/omarchy-vpn/uninstall-system.sh
 ```
+
+That copy is installed root-owned, so removal does not depend on the plugin
+folder still being there — and nothing under your home directory is executed
+with privilege to do it.
 
 ## Security model
 
+- **The one-time setup is the only moment anything privileged reads the plugin
+  folder, and it does not trust it.** The plugin folder lives in your home
+  directory and you can write it, so the installer treats it as untrusted input:
+  it works from a fixed list of five files, opens each one itself refusing to
+  follow a symlink at any point in the path, rejects anything that is not a
+  plain file owned by you or root and unwritable by anyone else, and copies the
+  bytes into a root-only staging directory while hashing them. Those bytes are
+  compared against digests recorded in `install-system.sh` when the release was
+  cut, and only the staged, verified copies are installed. A file swapped or
+  relinked while the prompt is on screen therefore cannot be the file that
+  lands — the install fails and writes nothing.
+  What this cannot do is vouch for `install-system.sh` itself: you are choosing
+  to run that script as root, so the first setup on a machine is a decision to
+  trust the checkout you are looking at. Read it before you run it, and after
+  that everything root executes — the helper, the dispatcher hook, the unit and
+  the uninstaller — lives under `/usr/local/lib/omarchy-vpn` and `/etc`,
+  root-owned, never in your home directory.
 - The unprivileged backend (`vpn.sh`) never interpolates untrusted data into a
   shell; every external command is called with an explicit argv, and config
   values are handled as data. Config files are size- and format-checked before
@@ -177,6 +201,18 @@ pkexec ~/.config/omarchy/plugins/io.github.grootaiinfinity.vpn/uninstall-system.
 - The kill switch persists across reboots only while **Restore the last session
   after a reboot** is on. Turn it off from the panel (or
   `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- **Upgrading to 1.4.0 — re-run "Update system integration".** The setup step
+  used to check the files in `system/` by path and then hand the same paths to
+  `install`, which reopened them. Between those two reads the files could be
+  replaced — with a symlink, or by renaming the directory — so what a user
+  authorised and what root installed were not guaranteed to be the same bytes,
+  and root would then execute the result from `/usr/local/lib`, the dispatcher
+  and the unit. 1.4.0 stages every file through a descriptor it opens itself
+  without following links and installs only what matches a digest committed
+  with the release. The uninstaller is now installed root-owned alongside the
+  helper; remove the integration with
+  `pkexec /usr/local/lib/omarchy-vpn/uninstall-system.sh`. Nothing about the
+  kill switch's behaviour changes.
 - **Upgrading to 1.3.0:** the kill switch no longer carries the two lenient
   "handshake to any host" rules. Earlier versions allowed UDP to and from any
   address on every configured endpoint port, which let traffic leave past the

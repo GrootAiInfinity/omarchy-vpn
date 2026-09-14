@@ -954,17 +954,20 @@ cmd_status() {
 
   # `omarchy plugin update` refreshes the plugin folder but none of the root-owned
   # system files, so a fixed helper — or a fixed systemd unit — can sit on disk
-  # unused while the kill switch keeps failing. Compare all four and flag the
-  # mismatch so the panel can offer to re-run Setup.
+  # unused while the kill switch keeps failing. Compare every file Setup
+  # installs and flag the mismatch so the panel can offer to re-run it. The
+  # paths are relative to the plugin folder and mirror the PAYLOAD list in
+  # install-system.sh.
   local helper_stale=false pair src dst
   if [[ $integration == true ]]; then
     for pair in \
-      "omarchy-vpn-helper:$HELPER" \
-      "omarchy-vpn-killswitch.service:/etc/systemd/system/omarchy-vpn-killswitch.service" \
-      "50-omarchy-vpn:/etc/NetworkManager/dispatcher.d/50-omarchy-vpn" \
-      "com.omarchy.vpn.policy:/usr/share/polkit-1/actions/com.omarchy.vpn.policy"
+      "system/omarchy-vpn-helper:$HELPER" \
+      "system/omarchy-vpn-killswitch.service:/etc/systemd/system/omarchy-vpn-killswitch.service" \
+      "system/50-omarchy-vpn:/etc/NetworkManager/dispatcher.d/50-omarchy-vpn" \
+      "system/com.omarchy.vpn.policy:/usr/share/polkit-1/actions/com.omarchy.vpn.policy" \
+      "uninstall-system.sh:/usr/local/lib/omarchy-vpn/uninstall-system.sh"
     do
-      src="$PLUGIN_DIR/system/${pair%%:*}"; dst=${pair#*:}
+      src="$PLUGIN_DIR/${pair%%:*}"; dst=${pair#*:}
       [[ -r $src ]] || continue
       [[ -r $dst ]] || { helper_stale=true; break; }
       [[ $(sha256sum < "$src" 2>/dev/null) == $(sha256sum < "$dst" 2>/dev/null) ]] \
