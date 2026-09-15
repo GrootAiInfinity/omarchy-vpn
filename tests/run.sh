@@ -232,5 +232,228 @@ else
 fi
 
 echo
+echo "public-IP ingest"
+
+# ------------------------------------------------- the one untrusted input
+# `refresh-ip` is the only place this plugin reads a third-party HTTP response,
+# and the endpoint behind it is user-configurable. These run the real vpn.sh in a
+# throwaway HOME with a stubbed curl, so what is exercised is the shipped code
+# path rather than a re-implementation of it.
+IPT="$TMP/ip"; mkdir -p "$IPT/bin"
+
+# Stub curl: emits the fixture in small chunks and records how many bytes it
+# managed to write before the reader went away. That byte count is what proves
+# an over-sized transfer is actually cut short rather than merely ignored.
+cat > "$IPT/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+# SIGPIPE has to be ignored, not handled: if the reader's cap closes the pipe
+# and the default disposition kills this shell, the byte count is never recorded
+# and the check silently reads whatever a previous run left behind.
+written=0
+trap '' PIPE
+trap 'printf "%s" "$written" > "$STUB_WROTE"' EXIT
+[[ -n ${STUB_RC:-} && $STUB_RC != 0 ]] && exit "$STUB_RC"
+while IFS= read -r -d '' -n 4096 chunk || [[ -n $chunk ]]; do
+  printf '%s' "$chunk" 2>/dev/null || break
+  written=$((written + ${#chunk}))
+done < "$STUB_BODY"
+STUB
+chmod +x "$IPT/bin/curl"
+
+# refresh <fixture-file> [curl-rc] -> published cache in $IPCACHE
+IPCACHE=""
+refresh() {
+  local home="$IPT/home"; rm -rf -- "$home"; mkdir -p "$home"
+  rm -f -- "$IPT/wrote"          # never let a previous run's count be read back
+  IPCACHE="$home/state/omarchy-vpn/pubip.json"
+  STUB_BODY=$1 STUB_WROTE="$IPT/wrote" STUB_RC=${2:-0} \
+  HOME="$home" XDG_STATE_HOME="$home/state" XDG_CONFIG_HOME="$home/config" \
+  XDG_RUNTIME_DIR="$home/run" PATH="$IPT/bin:$PATH" \
+  OMARCHY_VPN_PUBLICIPURL="https://example.invalid/json" \
+    bash "$REPO/vpn.sh" refresh-ip >/dev/null 2>&1
+}
+# jq's // treats false as empty, so a published {"ok":false} would read as
+# absent. Test for presence explicitly instead.
+field() { jq -r "$1 | if . == null then \"<absent>\" else tostring end" \
+            < "$IPCACHE" 2>/dev/null || echo "<unreadable>"; }
+
+MAXB=$(sed -n 's/^PUBIP_MAX_BYTES=\([0-9]*\)$/\1/p' "$REPO/vpn.sh")
+MAXF=$(sed -n 's/^PUBIP_MAX_FIELD=\([0-9]*\)$/\1/p' "$REPO/vpn.sh")
+MAXO=$(sed -n 's/^PUBIP_MAX_OUTPUT=\([0-9]*\)$/\1/p' "$REPO/vpn.sh")
+check "$([[ -n $MAXB && -n $MAXF && -n $MAXO ]] && echo yes)" yes "the response bounds are declared as constants"
+
+# 19. the happy path still works
+printf '%s' '{"ip":"203.0.113.9","city":"Auckland","country":"NZ","org":"AS64496 Example"}' > "$IPT/good.json"
+refresh "$IPT/good.json"
+check "$(field .ok)"      true         "a normal answer is accepted"
+check "$(field .ip)"      "203.0.113.9" "the address is read"
+check "$(field .city)"    "Auckland"    "the city is read"
+check "$(field .country)" "NZ"          "the country is read"
+
+# 20. an unbounded body is cut off mid-transfer, not slurped and then judged
+python3 -c "
+import json,sys
+sys.stdout.write(json.dumps({'ip':'203.0.113.9','city':'A'*10*1024*1024}))
+" > "$IPT/huge.json"
+refresh "$IPT/huge.json"
+check "$(field .ok)" false "a 10 MB answer is refused"
+wrote=$(cat "$IPT/wrote" 2>/dev/null || echo "")
+if [[ -z $wrote ]]; then
+  bad "the over-sized transfer is stopped early" "the stub recorded no byte count"
+elif (( wrote > 0 && wrote < 1048576 )); then
+  ok "the over-sized transfer is stopped early (server wrote ${wrote}B of 10 MB)"
+else
+  bad "the over-sized transfer is stopped early" "server managed to write ${wrote} bytes"
+fi
+
+# 21. the boundary itself: at the cap is fine, one byte over is refused
+python3 -c "
+import sys
+cap = $MAXB
+head = '{\"ip\":\"203.0.113.9\",\"city\":\"'
+tail = '\"}'
+sys.stdout.write(head + 'x'*(cap-len(head)-len(tail)) + tail)
+" > "$IPT/exact.json"
+check "$(wc -c < "$IPT/exact.json")" "$MAXB" "fixture is exactly at the cap"
+refresh "$IPT/exact.json"
+check "$(field .ok)" true "a body exactly at the cap is accepted"
+{ cat "$IPT/exact.json"; printf ' '; } > "$IPT/over.json"
+refresh "$IPT/over.json"
+check "$(field .ok)" false "one byte past the cap is refused"
+
+# 22. a truncated prefix that is still valid JSON must not be accepted
+python3 -c "
+import sys
+cap = $MAXB
+doc = '{\"ip\":\"203.0.113.9\"}'
+sys.stdout.write(doc + ' '*(cap*2 - len(doc)))
+" > "$IPT/prefixvalid.json"
+refresh "$IPT/prefixvalid.json"
+check "$(field .ok)" false "an over-long body whose prefix parses is still refused"
+
+# 23. field lengths are bounded inside an otherwise small document
+python3 -c "
+import json,sys
+sys.stdout.write(json.dumps({'ip':'203.0.113.9','city':'B'*4000}))
+" > "$IPT/longfield.json"
+refresh "$IPT/longfield.json"
+city=$(field .city)
+check "${#city}" "$MAXF" "an over-long field is cut to the field limit"
+
+# 24. control characters never reach the cache
+printf '%s' '{"ip":"203.0.113.9","city":"Auck\u0007land\u001b[31m","country":"N\u0000Z"}' > "$IPT/ctrl.json"
+refresh "$IPT/ctrl.json"
+if LC_ALL=C grep -qP '[\x00-\x1f\x7f]' <<<"$(field .city)$(field .country)"; then
+  bad "control characters are stripped from every field"
+else
+  ok "control characters are stripped from every field"
+fi
+
+# 25. documents that are not objects
+for bad_doc in '[1,2,3]' '42' '"hello"' 'null'; do
+  printf '%s' "$bad_doc" > "$IPT/nonobj.json"
+  refresh "$IPT/nonobj.json"
+  [[ $(field .ok) == false ]] || bad "a non-object document ($bad_doc) is refused"
+done
+ok "a non-object document is refused"
+
+# 26. malformed and empty answers, and a failing request
+printf '%s' 'not json at all' > "$IPT/bad.json"; refresh "$IPT/bad.json"
+check "$(field .ok)" false "a non-JSON answer is refused"
+: > "$IPT/empty.json"; refresh "$IPT/empty.json"
+check "$(field .ok)" false "an empty answer is refused"
+refresh "$IPT/good.json" 7
+check "$(field .ok)" false "a failed request publishes an unavailable marker"
+
+# 27. structured values where a scalar was expected
+printf '%s' '{"ip":{"v4":"203.0.113.9"},"city":["A"],"org":{"asn":"AS1"}}' > "$IPT/struct.json"
+refresh "$IPT/struct.json"
+check "$(field .ok)"   true "a document with structured fields still parses"
+check "$(field .ip)"   "<absent>" "an object in the address field is dropped"
+check "$(field .city)" "<absent>" "an array in the city field is dropped"
+
+# 28. the address field has to look like an address
+printf '%s' '{"ip":"<img src=x onerror=alert(1)>","city":"Auckland"}' > "$IPT/markup.json"
+refresh "$IPT/markup.json"
+check "$(field .ip)"   "<absent>"  "a non-address in the address field is dropped"
+check "$(field .city)" "Auckland"  "the rest of the document survives it"
+
+# 29. a nested lookup that is not an object must not abort the whole parse
+printf '%s' '{"ip":"203.0.113.9","connection":"nope"}' > "$IPT/nested.json"
+refresh "$IPT/nested.json"
+check "$(field .ok)" true "a scalar where a nested object was expected is tolerated"
+
+# 30. whatever happened, the cache is a bounded JSON object and nothing is left behind
+allgood=yes; leftover=no
+for f in good huge exact over longfield ctrl bad empty struct markup nested; do
+  refresh "$IPT/$f.json"
+  jq -e 'type == "object"' >/dev/null 2>&1 < "$IPCACHE" || allgood=no
+  (( $(wc -c < "$IPCACHE") <= MAXO )) || allgood=no
+  found=$(find "$(dirname -- "$IPCACHE")" -name 'pubip.json.*' 2>/dev/null | head -1)
+  [[ -n $found ]] && leftover=yes
+done
+check "$allgood" yes "every outcome publishes a bounded JSON object"
+check "$leftover" no  "no staging file is left in the state directory"
+
+# 31. publication is a rename, and an over-sized candidate leaves the old file alone
+refresh "$IPT/good.json"
+before=$(cat "$IPCACHE")
+( set +e
+  # shellcheck disable=SC1090
+  source <(sed -n '/^pubip_publish()/,/^}/p' "$REPO/vpn.sh")
+  PUBIP_CACHE="$IPCACHE" PUBIP_MAX_OUTPUT=$MAXO
+  head -c $((MAXO + 4096)) /dev/zero | tr '\0' 'x' | pubip_publish
+) >/dev/null 2>&1
+check "$(cat "$IPCACHE")" "$before" "an over-sized candidate leaves the published file untouched"
+grep -q 'mv -f -- "$tmp" "$PUBIP_CACHE"' "$REPO/vpn.sh" \
+  && ok "the cache is published by rename, not written in place" \
+  || bad "the cache is published by rename, not written in place"
+
+# 32. the transport policy the reviewer asked to keep
+rip=$(sed -n '/^cmd_refresh_ip()/,/^}/p' "$REPO/vpn.sh")
+for flag in "--proto '=https'" "--tlsv1.2" "--max-time" "--max-filesize" "head -c"; do
+  grep -qF -- "$flag" <<<"$rip" || bad "refresh-ip still uses $flag"
+done
+ok "HTTPS-only, the timeout, the header cap and the read cap are all still in place"
+grep -qE '^\s*\[\[ \$SET_IP_URL =~ \^https:// \]\]' <<<"$rip" \
+  && ok "a non-HTTPS endpoint is refused before any request" \
+  || bad "a non-HTTPS endpoint is refused before any request"
+
+# 33. the lookup can still be switched off entirely
+refresh "$IPT/good.json" 0
+( export OMARCHY_VPN_PUBLICIPLOOKUP=false
+  home="$IPT/home"
+  STUB_BODY="$IPT/good.json" STUB_WROTE="$IPT/wrote" \
+  HOME="$home" XDG_STATE_HOME="$home/state" XDG_CONFIG_HOME="$home/config" \
+  XDG_RUNTIME_DIR="$home/run" PATH="$IPT/bin:$PATH" \
+    bash "$REPO/vpn.sh" refresh-ip >/dev/null 2>&1 )
+check "$(field .disabled)" true "turning the lookup off publishes the disabled marker"
+
+# 34. a cache that parses but is not an object must not reach the status JSON
+refresh "$IPT/good.json"
+printf '%s' '[1,2,3]' > "$IPCACHE"
+st=$( HOME="$IPT/home" XDG_STATE_HOME="$IPT/home/state" XDG_CONFIG_HOME="$IPT/home/config" \
+      XDG_RUNTIME_DIR="$IPT/home/run" PATH="$IPT/bin:$PATH" \
+      bash "$REPO/vpn.sh" status 2>/dev/null )
+check "$(jq -c '.public' <<<"$st" 2>/dev/null)" '{}' \
+  "status replaces a non-object cache with an empty object"
+
+# 35. status survives a hand-written oversized cache
+refresh "$IPT/good.json"
+python3 -c "
+import json,sys
+sys.stdout.write(json.dumps({'ok':True,'city':'C'*(1024*512)}))
+" > "$IPCACHE"
+st=$( HOME="$IPT/home" XDG_STATE_HOME="$IPT/home/state" XDG_CONFIG_HOME="$IPT/home/config" \
+      XDG_RUNTIME_DIR="$IPT/home/run" PATH="$IPT/bin:$PATH" \
+      bash "$REPO/vpn.sh" status 2>/dev/null )
+if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$st"; then
+  check "$(jq -r '.public.city // "<absent>"' <<<"$st")" "<absent>" \
+    "status ignores an oversized cache rather than embedding it"
+else
+  bad "status ignores an oversized cache rather than embedding it" "status produced no JSON"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 (( fail == 0 ))

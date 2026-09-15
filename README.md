@@ -201,6 +201,16 @@ with privilege to do it.
 - The kill switch persists across reboots only while **Restore the last session
   after a reboot** is on. Turn it off from the panel (or
   `pkexec omarchy-vpn-helper killswitch off`) before removing the plugin.
+- **Upgrading to 1.5.0.** The public-IP lookup is the one third-party response
+  this plugin reads, and the endpoint behind it is configurable, so it is now
+  treated as untrusted from the wire inwards. The reply is capped as it is read
+  rather than where the server declares its length, anything past the cap is
+  refused instead of parsed, every field is limited in type and length with
+  control characters stripped, and the cached result is size-checked and
+  published by rename so the widget can never read a half-written file. Nothing
+  to re-install and no behaviour change for a well-behaved provider; a reply
+  that is malformed, enormous or simply missing now shows as unavailable
+  instead of being rendered.
 - **Upgrading to 1.4.0 — re-run "Update system integration".** The setup step
   used to check the files in `system/` by path and then hand the same paths to
   `install`, which reopened them. Between those two reads the files could be

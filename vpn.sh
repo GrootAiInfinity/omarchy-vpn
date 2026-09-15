@@ -40,6 +40,15 @@ INBOX="$CONF_HOME/inbox"
 STORE="$STATE_HOME/store"
 META_DIR="$STATE_HOME/servers"
 PUBIP_CACHE="$STATE_HOME/pubip.json"
+# Bounds for the one third-party HTTP response this plugin reads. That endpoint
+# is user-configurable and answers while the tunnel is up, so it is the only
+# input here that an outside party controls: it gets capped on the wire, capped
+# per field, and capped again before anything is published. A geolocation answer
+# is a few hundred bytes, so 64 KiB is two orders of magnitude of headroom and
+# still a hard ceiling.
+PUBIP_MAX_BYTES=65536
+PUBIP_MAX_FIELD=200
+PUBIP_MAX_OUTPUT=4096
 # Two separate pointers on purpose: LAST_FILE is "what did I use most recently"
 # and only ever changes when a tunnel actually comes up (it drives the bar's
 # right-click toggle across shell restarts). AUTO_FILE is "what should come back
@@ -135,6 +144,24 @@ chmod 700 "$STATE_HOME" "$STORE" "$RUN_DIR" 2>/dev/null || true
 # ------------------------------------------------------------------ helpers
 die()  { printf '{"ok":false,"error":%s}\n' "$(jq -Rn --arg s "$*" '$s')"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Sole writer of the public-IP cache: reads the candidate on stdin, refuses it if
+# it exceeds the output ceiling, and publishes with a rename so a concurrent
+# reader sees either the old file or the new one and never a half-written one.
+# The widget polls this file, and `status` slurps it straight into its JSON, so
+# both of those properties are load-bearing.
+pubip_publish() {
+  local tmp
+  tmp=$(mktemp -- "$PUBIP_CACHE.XXXXXX") || return 1
+  # Bound the candidate here too rather than trusting the caller to have done it:
+  # one byte past the ceiling is enough to tell "at the limit" from "over it".
+  if ! head -c $(( PUBIP_MAX_OUTPUT + 1 )) > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if (( $(wc -c < "$tmp") > PUBIP_MAX_OUTPUT )); then rm -f -- "$tmp"; return 1; fi
+  chmod 600 -- "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$PUBIP_CACHE" || { rm -f -- "$tmp"; return 1; }
+}
+
+pubip_unavailable() { jq -nc '{ok:false,at:(now|floor)}' | pubip_publish || true; }
 
 # The root helper lives outside the plugin folder, so `omarchy plugin update`
 # cannot replace it: an older one can still be installed after this plugin has
@@ -829,22 +856,60 @@ cmd_apply_session() {
 }
 
 cmd_refresh_ip() {
-  [[ $SET_IP_LOOKUP == true ]] || { printf '{"disabled":true}\n' > "$PUBIP_CACHE"; exit 0; }
-  have curl                    || exit 0
-  [[ $SET_IP_URL =~ ^https:// ]] || exit 0
-  local body
-  body=$(curl -fsS --max-time 6 --proto '=https' --tlsv1.2 \
-              -H 'Accept: application/json' -- "$SET_IP_URL" 2>/dev/null || true)
-  if [[ -z $body ]] || ! jq -e . >/dev/null 2>&1 <<<"$body"; then
-    jq -n '{ok:false,at:(now|floor)}' > "$PUBIP_CACHE"; exit 0
+  [[ $SET_IP_LOOKUP == true ]] || { printf '{"disabled":true}\n' | pubip_publish || true; return 0; }
+  have curl                    || return 0
+  [[ $SET_IP_URL =~ ^https:// ]] || return 0
+
+  local resp=""
+  trap 'rm -f -- "$resp"' RETURN
+  resp=$(mktemp -- "$PUBIP_CACHE.body.XXXXXX") || { pubip_unavailable; return 0; }
+
+  # The response is bounded where it is *read*, not where it is announced.
+  # curl's --max-filesize believes Content-Length, which a hostile or merely
+  # broken endpoint can omit outright (chunked replies carry none) or simply
+  # understate; `head -c` bounds what this process actually consumes whatever the
+  # headers claim, and closing the pipe stops the transfer. Both are kept: the
+  # header check refuses an over-sized body before a byte of it moves.
+  # One byte past the cap is read on purpose, so "exactly at the limit" and
+  # "there was more" are distinguishable and the truncated case can be rejected
+  # rather than parsed — a truncated prefix can still be well-formed JSON, so
+  # letting the parser decide would accept attacker-chosen values.
+  { curl -fsS --max-time 6 --proto '=https' --tlsv1.2 \
+         --max-filesize "$PUBIP_MAX_BYTES" \
+         -H 'Accept: application/json' -- "$SET_IP_URL" 2>/dev/null || true; } \
+    | head -c $(( PUBIP_MAX_BYTES + 1 )) > "$resp" || true
+
+  local size=0
+  [[ -f $resp ]] && size=$(wc -c < "$resp")
+  if (( size == 0 || size > PUBIP_MAX_BYTES )) \
+     || ! jq -e 'type == "object"' >/dev/null 2>&1 < "$resp"; then
+    pubip_unavailable; return 0
   fi
-  jq '{
-        ok:true, at:(now|floor),
-        ip:    (.ip // .query // .address // null),
-        city:  (.city // .region // null),
-        country:(.country // .country_name // .countryCode // null),
-        org:   (.org // .isp // .asn // .connection.org // null)
-      }' <<<"$body" > "$PUBIP_CACHE"
+
+  # Everything below treats the parsed document as hostile: only scalars are
+  # accepted, control characters are stripped (they would otherwise reach a
+  # terminal running `status` and the always-on-screen bar label), every field is
+  # cut to a fixed length, and `ip` additionally has to look like an address.
+  local rendered
+  if ! rendered=$(jq -c --argjson max "$PUBIP_MAX_FIELD" '
+        def pick($k): if type == "object" then .[$k] else null end;
+        def clean:
+          (if type == "string" then . elif type == "number" then tostring else null end)
+          | if . == null then null
+            else gsub("[[:cntrl:]]"; "") | .[0:$max] | if . == "" then null else . end
+            end;
+        {
+          ok:true, at:(now|floor),
+          ip:     ((.ip // .query // .address) | clean
+                   | if . != null and test("^[0-9A-Fa-f:.]{2,45}$") then . else null end),
+          city:   ((.city // .region) | clean),
+          country:((.country // .country_name // .countryCode) | clean),
+          org:    ((.org // .isp // .asn // (.connection | pick("org"))) | clean)
+        }' < "$resp" 2>/dev/null); then
+    pubip_unavailable; return 0
+  fi
+
+  printf '%s\n' "$rendered" | pubip_publish || pubip_unavailable
 }
 
 cmd_killswitch() {
@@ -945,9 +1010,13 @@ cmd_status() {
     servers+=("$js")
   done
 
+  # Bounded on the way back in as well: this file is published bounded above, but
+  # an older version or a hand-edit could have left something larger, and it goes
+  # straight into the status JSON the widget renders. Must be an object — a bare
+  # number or array would parse but then be indexed as one downstream.
   local pubip='{}'
-  [[ -r $PUBIP_CACHE ]] && pubip=$(cat "$PUBIP_CACHE" 2>/dev/null || echo '{}')
-  jq -e . >/dev/null 2>&1 <<<"$pubip" || pubip='{}'
+  [[ -r $PUBIP_CACHE ]] && pubip=$(head -c "$PUBIP_MAX_OUTPUT" < "$PUBIP_CACHE" 2>/dev/null || echo '{}')
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$pubip" || pubip='{}'
 
   local inbox_count=0
   shopt -s nullglob; local ib=("$INBOX"/*.conf); inbox_count=${#ib[@]}
